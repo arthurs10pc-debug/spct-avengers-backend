@@ -1,3 +1,7 @@
+const dns = require('dns');
+// Force IPv4 globally to completely stop ENETUNREACH on Render
+dns.setDefaultResultOrder('ipv4first');
+
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -55,15 +59,14 @@ const rideSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 const Ride = mongoose.model('Ride', rideSchema);
 
-// In-memory OTP storage: { "email@gmail.com": { otp: "123456", expires: 1700000000 } }
+// In-memory OTP storage
 const otpStore = new Map();
 
-// --- Production Nodemailer Transporter (Render IPv4 Fix) ---
+// --- Production Nodemailer Transporter (Render IPv4 Safe) ---
 const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
   port: 587,
-  secure: false, // Must be false for Port 587 (uses STARTTLS)
-  family: 4,     // Force IPv4 lookup to prevent ENETUNREACH on Render
+  secure: false, // STARTTLS
   auth: {
     user: (process.env.GMAIL_USER || 'arthurs10pc@gmail.com').trim(),
     pass: (process.env.GMAIL_APP_PASS || '').replace(/\s+/g, '')
@@ -195,7 +198,7 @@ app.get('/api/rides', async (req, res) => {
 app.post('/api/rides', async (req, res) => {
   try {
     const newRide = await Ride.create(req.body);
-    io.emit('newRide', newRide); // Real-time notification to all active clients
+    io.emit('newRide', newRide);
     res.status(201).json(newRide);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -216,7 +219,7 @@ app.patch('/api/rides/:id/status', async (req, res) => {
   }
 });
 
-// 4. Admin Specific Endpoints
+// 4. Admin Endpoints
 app.get('/api/admin/users', async (req, res) => {
   try {
     const users = await User.find().sort({ createdAt: -1 });
