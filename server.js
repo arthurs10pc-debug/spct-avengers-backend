@@ -1,13 +1,9 @@
-const dns = require('dns');
-dns.setDefaultResultOrder('ipv4first');
-
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const { Server } = require('socket.io');
-const nodemailer = require('nodemailer');
 
 const app = express();
 const server = http.createServer(app);
@@ -38,9 +34,9 @@ mongoose.connect(MONGO_URI)
 const userSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
   gmail: { type: String, required: true, unique: true },
-  phone: { type: String, required: true },
-  role: { type: String, enum: ['biker', 'user', 'ride_taker'], default: 'user' },
-  isVerified: { type: Boolean, default: false },
+  phone: { type: String, default: '' },
+  avatar: { type: String, default: '' },
+  role: { type: String, enum: ['biker', 'ride_taker', 'user'], default: 'ride_taker' },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -63,144 +59,90 @@ const rideSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 const Ride = mongoose.model('Ride', rideSchema);
 
-// In-memory OTP storage
-const otpStore = new Map();
-
-// --- Production Nodemailer Transporter (Strict IPv4 Lookup Fix) ---
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // STARTTLS
-  lookup: (hostname, options, callback) => {
-    // Force direct IPv4 resolution to eliminate ENETUNREACH IPv6 routing errors
-    return dns.lookup(hostname, { family: 4 }, callback);
-  },
-  auth: {
-    user: (process.env.GMAIL_USER || 'arthurs10pc@gmail.com').trim(),
-    pass: (process.env.GMAIL_APP_PASS || '').replace(/\s+/g, '')
-  },
-  tls: {
-    rejectUnauthorized: false
-  }
-});
-
-// Verify SMTP connection on startup
-transporter.verify((error) => {
-  if (error) {
-    console.error('[SMTP ERROR] Transporter connection failed:', error.message);
-  } else {
-    console.log('[SMTP READY] Gmail SMTP Server ready for instant dispatch.');
-  }
-});
-
-// --- API Endpoints ---
-
 // Root health check
 app.get('/', (req, res) => {
   res.json({ message: 'SPCT Avengers Backend is running live.' });
 });
 
-// 1. Send OTP Endpoint
-app.post('/api/auth/send-otp', async (req, res) => {
-  const { email, name, fullName, phone, role } = req.body;
-  const userName = name || fullName;
+// --- Unified Google Authentication (Login + Sign Up) ---
+app.post('/api/auth/google-login', async (req, res) => {
+  const { fullName, email, avatar, phone, role, mode } = req.body;
 
   if (!email || !email.includes('@')) {
-    return res.status(400).json({ error: 'Valid Gmail address is required.' });
-  }
-
-  if (!process.env.GMAIL_APP_PASS) {
-    return res.status(500).json({ 
-      error: 'Backend Error: GMAIL_APP_PASS is missing in Render Environment Variables.' 
-    });
+    return res.status(400).json({ error: 'Valid Gmail account is required.' });
   }
 
   const cleanEmail = email.trim().toLowerCase();
-  const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
-
-  // Store OTP for 10 minutes
-  otpStore.set(cleanEmail, {
-    otp: generatedOtp,
-    expires: Date.now() + 10 * 60 * 1000,
-    registrationData: { fullName: userName, phone, role }
-  });
-
-  const mailOptions = {
-    from: `"SPCT Avengers" <${(process.env.GMAIL_USER || 'arthurs10pc@gmail.com').trim()}>`,
-    to: cleanEmail,
-    subject: `Your SPCT Avengers Login OTP: ${generatedOtp}`,
-    html: `
-      <div style="font-family: Arial, sans-serif; padding: 20px; color: #111; max-width: 500px; border: 1px solid #e2e8f0; border-radius: 8px;">
-        <h2 style="color: #0f172a; margin-top: 0;">SPCT Avengers Verification</h2>
-        <p>Use the OTP below to complete your authentication:</p>
-        <div style="font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #2563eb; padding: 15px 0; text-align: center; background-color: #eff6ff; border-radius: 6px; margin: 20px 0;">
-          ${generatedOtp}
-        </div>
-        <p style="font-size: 13px; color: #64748b;">This OTP will expire in 10 minutes. If you did not request this code, please ignore this email.</p>
-      </div>
-    `
-  };
 
   try {
-    await transporter.sendMail(mailOptions);
-    console.log(`[OTP DISPATCH] Successfully sent OTP to ${cleanEmail}`);
-    return res.json({ success: true, message: 'OTP sent successfully.' });
-  } catch (err) {
-    console.error('Nodemailer error:', err);
-    return res.status(500).json({ 
-      error: `Email Dispatch Failed: ${err.message || 'SMTP Authentication / Network error'}` 
-    });
-  }
-});
+    let user = await User.findOne({ gmail: cleanEmail });
 
-// 2. Verify OTP & Login/Register Endpoint
-app.post('/api/auth/verify-otp', async (req, res) => {
-  const { email, otp } = req.body;
-  if (!email || !otp) {
-    return res.status(400).json({ error: 'Email and OTP are required.' });
-  }
+    // Mode: Login
+    if (mode === 'login') {
+      if (!user) {
+        return res.status(404).json({ 
+          error: 'No account found with this Gmail. Please switch to "Sign Up" tab first.' 
+        });
+      }
 
-  const cleanEmail = email.trim().toLowerCase();
-  const record = otpStore.get(cleanEmail);
+      if (avatar && !user.avatar) user.avatar = avatar;
+      if (role) user.role = role;
+      await user.save();
 
-  if (!record || record.otp !== otp.trim()) {
-    return res.status(400).json({ error: 'Invalid OTP entered. Please re-check your inbox.' });
-  }
-
-  if (Date.now() > record.expires) {
-    otpStore.delete(cleanEmail);
-    return res.status(400).json({ error: 'OTP has expired. Please request a new one.' });
-  }
-
-  otpStore.delete(cleanEmail);
-
-  let user = await User.findOne({ gmail: cleanEmail });
-  if (!user && record.registrationData) {
-    user = await User.create({
-      fullName: record.registrationData.fullName || 'User',
-      gmail: cleanEmail,
-      phone: record.registrationData.phone || '',
-      role: record.registrationData.role || 'user',
-      isVerified: true
-    });
-  }
-
-  const isAdmin = cleanEmail === 'arthurs10pc@gmail.com';
-
-  return res.json({
-    success: true,
-    user: {
-      _id: user ? user._id : 'admin',
-      name: user ? user.fullName : 'Arthur Admin',
-      email: cleanEmail,
-      phone: user ? user.phone : '',
-      role: user ? user.role : 'biker',
-      isAdmin
+      const isAdmin = cleanEmail === 'arthurs10pc@gmail.com';
+      return res.json({
+        success: true,
+        isNewUser: false,
+        user: {
+          _id: user._id.toString(),
+          name: user.fullName,
+          email: cleanEmail,
+          phone: user.phone || '',
+          avatar: user.avatar,
+          role: user.role,
+          isAdmin
+        }
+      });
     }
-  });
+
+    // Mode: Sign Up (or direct registration)
+    if (!user) {
+      user = await User.create({
+        fullName: fullName || 'Hostel Student',
+        gmail: cleanEmail,
+        phone: phone ? phone.trim() : '',
+        avatar: avatar || '',
+        role: role || 'ride_taker'
+      });
+    } else {
+      // Update existing if re-signing
+      if (phone) user.phone = phone.trim();
+      if (role) user.role = role;
+      if (avatar) user.avatar = avatar;
+      await user.save();
+    }
+
+    const isAdmin = cleanEmail === 'arthurs10pc@gmail.com';
+    return res.json({
+      success: true,
+      isNewUser: true,
+      user: {
+        _id: user._id.toString(),
+        name: user.fullName,
+        email: cleanEmail,
+        phone: user.phone || '',
+        avatar: user.avatar,
+        role: user.role,
+        isAdmin
+      }
+    });
+  } catch (err) {
+    console.error('Auth error:', err.message);
+    return res.status(500).json({ error: `Database Error: ${err.message}` });
+  }
 });
 
-// 3. Rides Endpoints
+// Rides Endpoints
 app.get('/api/rides', async (req, res) => {
   try {
     const rides = await Ride.find().sort({ createdAt: -1 });
@@ -210,7 +152,7 @@ app.get('/api/rides', async (req, res) => {
   }
 });
 
-// Socket Events Relay
+// Socket.io Real-time connection listener
 io.on('connection', (socket) => {
   socket.on('post_ride', async (rideData) => {
     try {
@@ -240,5 +182,5 @@ io.on('connection', (socket) => {
 // Server Initialization
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`SPCT Avengers Backend running on port ${PORT}`);
+  console.log(`SPCT Avengers Google-Auth Backend running on port ${PORT}`);
 });
