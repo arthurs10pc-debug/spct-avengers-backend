@@ -21,12 +21,23 @@ if (!MONGO_URI) {
 }
 
 mongoose.connect(MONGO_URI)
-  .then(() => console.log('MongoDB Cloud Atlas connected successfully.'))
+  .then(async () => {
+    console.log('MongoDB Cloud Atlas connected successfully.');
+    // Purane clash hone wale null email index ko drop karna
+    try {
+      await mongoose.connection.collection('users').dropIndex('email_1');
+      console.log('Legacy email_1 index dropped cleanly.');
+    } catch (e) {
+      // Pehle se dropped ho toh silently ignore
+    }
+  })
   .catch((err) => console.error('MongoDB Atlas connection error:', err.message));
 
+// Schema me email aur gmail dono rakhe hain taaki legacy collision na ho
 const userSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
-  gmail: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true },
+  gmail: { type: String },
   phone: { type: String, default: '' },
   avatar: { type: String, default: '' },
   role: { type: String, enum: ['biker', 'ride_taker', 'user'], default: 'ride_taker' },
@@ -66,7 +77,9 @@ app.post('/api/auth/google-login', async (req, res) => {
   const cleanEmail = email.trim().toLowerCase();
 
   try {
-    let user = await User.findOne({ gmail: cleanEmail });
+    let user = await User.findOne({ 
+      $or: [{ email: cleanEmail }, { gmail: cleanEmail }] 
+    });
 
     if (mode === 'login') {
       if (!user) {
@@ -74,6 +87,8 @@ app.post('/api/auth/google-login', async (req, res) => {
       }
       if (avatar && !user.avatar) user.avatar = avatar;
       if (role) user.role = role;
+      user.email = cleanEmail;
+      user.gmail = cleanEmail;
       await user.save();
 
       return res.json({
@@ -93,6 +108,7 @@ app.post('/api/auth/google-login', async (req, res) => {
     if (!user) {
       user = await User.create({
         fullName: fullName || 'Hostel Student',
+        email: cleanEmail,
         gmail: cleanEmail,
         phone: phone ? phone.trim() : '',
         avatar: avatar || '',
@@ -102,6 +118,8 @@ app.post('/api/auth/google-login', async (req, res) => {
       if (phone) user.phone = phone.trim();
       if (role) user.role = role;
       if (avatar) user.avatar = avatar;
+      user.email = cleanEmail;
+      user.gmail = cleanEmail;
       await user.save();
     }
 
@@ -122,7 +140,6 @@ app.post('/api/auth/google-login', async (req, res) => {
   }
 });
 
-// Fetch Active Rides
 app.get('/api/rides', async (req, res) => {
   try {
     const rides = await Ride.find().sort({ createdAt: -1 });
@@ -132,7 +149,6 @@ app.get('/api/rides', async (req, res) => {
   }
 });
 
-// Clear All Active Rides (Admin Action)
 app.delete('/api/rides/clear-all', async (req, res) => {
   try {
     await Ride.deleteMany({});
