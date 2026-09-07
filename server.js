@@ -40,20 +40,25 @@ const userSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
   gmail: { type: String, required: true, unique: true },
   phone: { type: String, required: true },
-  role: { type: String, enum: ['biker', 'user'], default: 'user' },
+  role: { type: String, enum: ['biker', 'user', 'ride_taker'], default: 'user' },
   isVerified: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
 
 const rideSchema = new mongoose.Schema({
-  bikerName: { type: String, required: true },
-  bikerEmail: { type: String, required: true },
-  bikerPhone: { type: String, required: true },
-  destination: { type: String, required: true },
-  departureTime: { type: String, required: true },
-  seatsAvailable: { type: Number, required: true },
-  status: { type: String, enum: ['active', 'full', 'completed', 'expired'], default: 'active' },
-  createdAt: { type: Date, default: Date.now, expires: 7200 } // Auto-deletes from DB after 2 hours
+  creatorId: { type: String, required: true },
+  creatorName: { type: String, required: true },
+  creatorPhone: { type: String, required: true },
+  creatorRole: { type: String, required: true },
+  fromLocation: { type: String, required: true },
+  toLocation: { type: String, required: true },
+  status: { type: String, enum: ['active', 'accepted', 'completed'], default: 'active' },
+  acceptedBy: {
+    name: String,
+    phone: String,
+    role: String
+  },
+  createdAt: { type: Date, default: Date.now, expires: 7200 }
 });
 
 const User = mongoose.model('User', userSchema);
@@ -92,12 +97,20 @@ app.get('/', (req, res) => {
   res.json({ message: 'SPCT Avengers Backend is running live.' });
 });
 
-// 1. Send OTP Endpoint
+// 1. Send OTP Endpoint (Detailed Error reporting)
 app.post('/api/auth/send-otp', async (req, res) => {
-  const { email, fullName, phone, role } = req.body;
+  const { email, name, fullName, phone, role } = req.body;
+  const userName = name || fullName;
 
   if (!email || !email.includes('@')) {
     return res.status(400).json({ error: 'Valid Gmail address is required.' });
+  }
+
+  // Env variable check
+  if (!process.env.GMAIL_APP_PASS) {
+    return res.status(500).json({ 
+      error: 'Backend Error: GMAIL_APP_PASS is missing in Render Environment Variables.' 
+    });
   }
 
   const cleanEmail = email.trim().toLowerCase();
@@ -107,7 +120,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
   otpStore.set(cleanEmail, {
     otp: generatedOtp,
     expires: Date.now() + 10 * 60 * 1000,
-    registrationData: { fullName, phone, role }
+    registrationData: { fullName: userName, phone, role }
   });
 
   const mailOptions = {
@@ -131,8 +144,11 @@ app.post('/api/auth/send-otp', async (req, res) => {
     console.log(`[OTP DISPATCH] Successfully sent OTP to ${cleanEmail}`);
     return res.json({ success: true, message: 'OTP sent successfully.' });
   } catch (err) {
-    console.error('Nodemailer error:', err.message);
-    return res.status(500).json({ error: 'Failed to dispatch email. Verify your Gmail App Password.' });
+    console.error('Nodemailer error:', err);
+    // Send exact error message to frontend so user sees the reason directly on screen
+    return res.status(500).json({ 
+      error: `Email Dispatch Failed: ${err.message || 'SMTP Authentication / Network error'}` 
+    });
   }
 });
 
@@ -147,7 +163,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   const record = otpStore.get(cleanEmail);
 
   if (!record || record.otp !== otp.trim()) {
-    return res.status(400).json({ error: 'Invalid OTP entered.' });
+    return res.status(400).json({ error: 'Invalid OTP entered. Please re-check your inbox.' });
   }
 
   if (Date.now() > record.expires) {
@@ -155,17 +171,15 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     return res.status(400).json({ error: 'OTP has expired. Please request a new one.' });
   }
 
-  // Clear OTP after successful check
   otpStore.delete(cleanEmail);
 
-  // Check or create user in MongoDB
   let user = await User.findOne({ gmail: cleanEmail });
   if (!user && record.registrationData) {
     user = await User.create({
       fullName: record.registrationData.fullName || 'User',
       gmail: cleanEmail,
       phone: record.registrationData.phone || '',
-      role: record.registrationData.role || 'biker',
+      role: record.registrationData.role || 'user',
       isVerified: true
     });
   }
@@ -175,9 +189,9 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   return res.json({
     success: true,
     user: {
-      id: user ? user._id : 'admin',
-      fullName: user ? user.fullName : 'Arthur Admin',
-      gmail: cleanEmail,
+      _id: user ? user._id : 'admin',
+      name: user ? user.fullName : 'Arthur Admin',
+      email: cleanEmail,
       phone: user ? user.phone : '',
       role: user ? user.role : 'biker',
       isAdmin
@@ -188,63 +202,38 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 // 3. Rides Endpoints
 app.get('/api/rides', async (req, res) => {
   try {
-    const rides = await Ride.find({ status: 'active' }).sort({ createdAt: -1 });
+    const rides = await Ride.find().sort({ createdAt: -1 });
     res.json(rides);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/rides', async (req, res) => {
-  try {
-    const newRide = await Ride.create(req.body);
-    io.emit('newRide', newRide);
-    res.status(201).json(newRide);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-app.patch('/api/rides/:id/status', async (req, res) => {
-  try {
-    const updatedRide = await Ride.findByIdAndUpdate(
-      req.params.id,
-      { status: req.body.status },
-      { new: true }
-    );
-    io.emit('updateRide', updatedRide);
-    res.json(updatedRide);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// 4. Admin Endpoints
-app.get('/api/admin/users', async (req, res) => {
-  try {
-    const users = await User.find().sort({ createdAt: -1 });
-    res.json(users);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/admin/rides/:id', async (req, res) => {
-  try {
-    await Ride.findByIdAndDelete(req.params.id);
-    io.emit('deleteRide', req.params.id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Socket.io Real-time connection listener
+// Socket Events Relay
 io.on('connection', (socket) => {
-  console.log(`[SOCKET] User connected: ${socket.id}`);
-  socket.on('disconnect', () => {
-    console.log(`[SOCKET] User disconnected: ${socket.id}`);
+  socket.on('post_ride', async (rideData) => {
+    try {
+      const newRide = await Ride.create(rideData);
+      io.emit('new_ride_broadcast', newRide);
+    } catch (err) {
+      console.error('Ride post error:', err.message);
+    }
   });
+
+  socket.on('accept_ride', async ({ rideId, accepter }) => {
+    try {
+      const updated = await Ride.findByIdAndUpdate(
+        rideId,
+        { status: 'accepted', acceptedBy: accepter },
+        { new: true }
+      );
+      io.emit('ride_accepted_broadcast', updated);
+    } catch (err) {
+      console.error('Ride accept error:', err.message);
+    }
+  });
+
+  socket.on('disconnect', () => {});
 });
 
 // Server Initialization
