@@ -8,29 +8,22 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io setup with CORS
-const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST', 'PATCH', 'DELETE']
-  }
-});
-
-// Middleware
-app.use(cors());
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PATCH', 'DELETE'] }));
 app.use(express.json());
 
-// --- MongoDB Atlas Connection ---
+const io = new Server(server, {
+  cors: { origin: '*', methods: ['GET', 'POST', 'PATCH', 'DELETE'] }
+});
+
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) {
-  console.error('[ERROR] MONGO_URI environment variable is missing.');
+  console.error('[ERROR] MONGO_URI is missing.');
 }
 
 mongoose.connect(MONGO_URI)
-  .then(() => console.log('MongoDB Cloud Atlas connected successfully for SPCT Avengers.'))
+  .then(() => console.log('MongoDB Cloud Atlas connected successfully.'))
   .catch((err) => console.error('MongoDB Atlas connection error:', err.message));
 
-// --- Database Schemas ---
 const userSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
   gmail: { type: String, required: true, unique: true },
@@ -59,17 +52,15 @@ const rideSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 const Ride = mongoose.model('Ride', rideSchema);
 
-// Root health check
 app.get('/', (req, res) => {
-  res.json({ message: 'SPCT Avengers Backend is running live.' });
+  res.json({ message: 'SPCT Avengers Backend v2 is live' });
 });
 
-// --- Unified Google Authentication (Login + Sign Up) ---
+// Google Authentication
 app.post('/api/auth/google-login', async (req, res) => {
   const { fullName, email, avatar, phone, role, mode } = req.body;
-
   if (!email || !email.includes('@')) {
-    return res.status(400).json({ error: 'Valid Gmail account is required.' });
+    return res.status(400).json({ error: 'Valid Gmail account required.' });
   }
 
   const cleanEmail = email.trim().toLowerCase();
@@ -77,22 +68,16 @@ app.post('/api/auth/google-login', async (req, res) => {
   try {
     let user = await User.findOne({ gmail: cleanEmail });
 
-    // Mode: Login
     if (mode === 'login') {
       if (!user) {
-        return res.status(404).json({ 
-          error: 'No account found with this Gmail. Please switch to "Sign Up" tab first.' 
-        });
+        return res.status(404).json({ error: 'No account found with this Gmail. Please Sign Up.' });
       }
-
       if (avatar && !user.avatar) user.avatar = avatar;
       if (role) user.role = role;
       await user.save();
 
-      const isAdmin = cleanEmail === 'arthurs10pc@gmail.com';
       return res.json({
         success: true,
-        isNewUser: false,
         user: {
           _id: user._id.toString(),
           name: user.fullName,
@@ -100,12 +85,11 @@ app.post('/api/auth/google-login', async (req, res) => {
           phone: user.phone || '',
           avatar: user.avatar,
           role: user.role,
-          isAdmin
+          isAdmin: cleanEmail === 'arthurs10pc@gmail.com'
         }
       });
     }
 
-    // Mode: Sign Up (or direct registration)
     if (!user) {
       user = await User.create({
         fullName: fullName || 'Hostel Student',
@@ -115,17 +99,14 @@ app.post('/api/auth/google-login', async (req, res) => {
         role: role || 'ride_taker'
       });
     } else {
-      // Update existing if re-signing
       if (phone) user.phone = phone.trim();
       if (role) user.role = role;
       if (avatar) user.avatar = avatar;
       await user.save();
     }
 
-    const isAdmin = cleanEmail === 'arthurs10pc@gmail.com';
     return res.json({
       success: true,
-      isNewUser: true,
       user: {
         _id: user._id.toString(),
         name: user.fullName,
@@ -133,16 +114,15 @@ app.post('/api/auth/google-login', async (req, res) => {
         phone: user.phone || '',
         avatar: user.avatar,
         role: user.role,
-        isAdmin
+        isAdmin: cleanEmail === 'arthurs10pc@gmail.com'
       }
     });
   } catch (err) {
-    console.error('Auth error:', err.message);
-    return res.status(500).json({ error: `Database Error: ${err.message}` });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Rides Endpoints
+// Fetch Active Rides
 app.get('/api/rides', async (req, res) => {
   try {
     const rides = await Ride.find().sort({ createdAt: -1 });
@@ -152,14 +132,24 @@ app.get('/api/rides', async (req, res) => {
   }
 });
 
-// Socket.io Real-time connection listener
+// Clear All Active Rides (Admin Action)
+app.delete('/api/rides/clear-all', async (req, res) => {
+  try {
+    await Ride.deleteMany({});
+    io.emit('all_rides_cleared');
+    res.json({ success: true, message: 'All active rides cleared from live database.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 io.on('connection', (socket) => {
   socket.on('post_ride', async (rideData) => {
     try {
       const newRide = await Ride.create(rideData);
       io.emit('new_ride_broadcast', newRide);
     } catch (err) {
-      console.error('Ride post error:', err.message);
+      console.error(err.message);
     }
   });
 
@@ -172,15 +162,12 @@ io.on('connection', (socket) => {
       );
       io.emit('ride_accepted_broadcast', updated);
     } catch (err) {
-      console.error('Ride accept error:', err.message);
+      console.error(err.message);
     }
   });
-
-  socket.on('disconnect', () => {});
 });
 
-// Server Initialization
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`SPCT Avengers Google-Auth Backend running on port ${PORT}`);
+  console.log(`SPCT Avengers Backend running on port ${PORT}`);
 });
