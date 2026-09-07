@@ -58,11 +58,11 @@ const rideSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 const Ride = mongoose.model('Ride', rideSchema);
 
-// In-Memory Live Rider Geospatial State (socketId -> rider coordinates)
-let activeLiveRiders = new Map();
+// In-Memory Live Rider GPS Positions
+const liveRiders = new Map();
 
 app.get('/', (req, res) => {
-  res.json({ message: 'SPCT Avengers Backend with Live GPS Radar is live' });
+  res.json({ message: 'SPCT Avengers Backend with Live Radar is live' });
 });
 
 // Google Authentication
@@ -148,7 +148,6 @@ app.get('/api/rides', async (req, res) => {
   }
 });
 
-// Admin Route
 app.get('/api/admin/bikers', async (req, res) => {
   try {
     const bikers = await User.find({ role: 'biker' }).sort({ createdAt: -1 });
@@ -178,29 +177,18 @@ app.delete('/api/rides/clear-all', async (req, res) => {
   }
 });
 
-// Socket Events for Proximity Tracking
+// Socket.io with Live GPS Tracking and Auto-Hide Accepted Rides
 io.on('connection', (socket) => {
-  // Rider broadcasts their real-time coordinates
-  socket.on('update_rider_location', (riderData) => {
+  // Rider broadcasts current GPS coordinates
+  socket.on('update_rider_gps', (riderData) => {
     if (riderData && riderData.userId) {
-      activeLiveRiders.set(socket.id, {
+      liveRiders.set(riderData.userId, {
+        ...riderData,
         socketId: socket.id,
-        userId: riderData.userId,
-        name: riderData.name,
-        phone: riderData.phone,
-        avatar: riderData.avatar,
-        latitude: riderData.latitude,
-        longitude: riderData.longitude,
-        updatedAt: Date.now()
+        lastUpdated: Date.now()
       });
-      // Broadcast updated riders pool to all connected clients
-      io.emit('live_riders_update', Array.from(activeLiveRiders.values()));
+      io.emit('nearby_riders_update', Array.from(liveRiders.values()));
     }
-  });
-
-  // Request all live riders list on demand
-  socket.on('get_live_riders', () => {
-    socket.emit('live_riders_update', Array.from(activeLiveRiders.values()));
   });
 
   socket.on('post_ride', async (rideData) => {
@@ -219,6 +207,7 @@ io.on('connection', (socket) => {
         { status: 'accepted', acceptedBy: accepter },
         { new: true }
       );
+      // Auto-removes from other riders instantly
       io.emit('ride_accepted_broadcast', updated);
     } catch (err) {
       console.error(err.message);
@@ -226,9 +215,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    if (activeLiveRiders.has(socket.id)) {
-      activeLiveRiders.delete(socket.id);
-      io.emit('live_riders_update', Array.from(activeLiveRiders.values()));
+    for (const [userId, rider] of liveRiders.entries()) {
+      if (rider.socketId === socket.id) {
+        liveRiders.delete(userId);
+        io.emit('nearby_riders_update', Array.from(liveRiders.values()));
+        break;
+      }
     }
   });
 });
