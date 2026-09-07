@@ -58,8 +58,11 @@ const rideSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 const Ride = mongoose.model('Ride', rideSchema);
 
+// In-Memory Live Rider Geospatial State (socketId -> rider coordinates)
+let activeLiveRiders = new Map();
+
 app.get('/', (req, res) => {
-  res.json({ message: 'SPCT Avengers Backend is live' });
+  res.json({ message: 'SPCT Avengers Backend with Live GPS Radar is live' });
 });
 
 // Google Authentication
@@ -145,7 +148,7 @@ app.get('/api/rides', async (req, res) => {
   }
 });
 
-// Admin Route: Get all registered bikers
+// Admin Route
 app.get('/api/admin/bikers', async (req, res) => {
   try {
     const bikers = await User.find({ role: 'biker' }).sort({ createdAt: -1 });
@@ -155,7 +158,6 @@ app.get('/api/admin/bikers', async (req, res) => {
   }
 });
 
-// Admin Route: Delete single ride
 app.delete('/api/rides/:id', async (req, res) => {
   try {
     await Ride.findByIdAndDelete(req.params.id);
@@ -166,7 +168,6 @@ app.delete('/api/rides/:id', async (req, res) => {
   }
 });
 
-// Clear All Active Rides
 app.delete('/api/rides/clear-all', async (req, res) => {
   try {
     await Ride.deleteMany({});
@@ -177,7 +178,31 @@ app.delete('/api/rides/clear-all', async (req, res) => {
   }
 });
 
+// Socket Events for Proximity Tracking
 io.on('connection', (socket) => {
+  // Rider broadcasts their real-time coordinates
+  socket.on('update_rider_location', (riderData) => {
+    if (riderData && riderData.userId) {
+      activeLiveRiders.set(socket.id, {
+        socketId: socket.id,
+        userId: riderData.userId,
+        name: riderData.name,
+        phone: riderData.phone,
+        avatar: riderData.avatar,
+        latitude: riderData.latitude,
+        longitude: riderData.longitude,
+        updatedAt: Date.now()
+      });
+      // Broadcast updated riders pool to all connected clients
+      io.emit('live_riders_update', Array.from(activeLiveRiders.values()));
+    }
+  });
+
+  // Request all live riders list on demand
+  socket.on('get_live_riders', () => {
+    socket.emit('live_riders_update', Array.from(activeLiveRiders.values()));
+  });
+
   socket.on('post_ride', async (rideData) => {
     try {
       const newRide = await Ride.create(rideData);
@@ -197,6 +222,13 @@ io.on('connection', (socket) => {
       io.emit('ride_accepted_broadcast', updated);
     } catch (err) {
       console.error(err.message);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    if (activeLiveRiders.has(socket.id)) {
+      activeLiveRiders.delete(socket.id);
+      io.emit('live_riders_update', Array.from(activeLiveRiders.values()));
     }
   });
 });
