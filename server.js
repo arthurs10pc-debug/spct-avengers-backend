@@ -23,17 +23,12 @@ if (!MONGO_URI) {
 mongoose.connect(MONGO_URI)
   .then(async () => {
     console.log('MongoDB Cloud Atlas connected successfully.');
-    // Purane clash hone wale null email index ko drop karna
     try {
       await mongoose.connection.collection('users').dropIndex('email_1');
-      console.log('Legacy email_1 index dropped cleanly.');
-    } catch (e) {
-      // Pehle se dropped ho toh silently ignore
-    }
+    } catch (e) {}
   })
   .catch((err) => console.error('MongoDB Atlas connection error:', err.message));
 
-// Schema me email aur gmail dono rakhe hain taaki legacy collision na ho
 const userSchema = new mongoose.Schema({
   fullName: { type: String, required: true },
   email: { type: String, required: true, unique: true },
@@ -64,7 +59,7 @@ const User = mongoose.model('User', userSchema);
 const Ride = mongoose.model('Ride', rideSchema);
 
 app.get('/', (req, res) => {
-  res.json({ message: 'SPCT Avengers Backend v2 is live' });
+  res.json({ message: 'SPCT Avengers Backend is live' });
 });
 
 // Google Authentication
@@ -140,6 +135,7 @@ app.post('/api/auth/google-login', async (req, res) => {
   }
 });
 
+// Rides API
 app.get('/api/rides', async (req, res) => {
   try {
     const rides = await Ride.find().sort({ createdAt: -1 });
@@ -149,11 +145,33 @@ app.get('/api/rides', async (req, res) => {
   }
 });
 
+// Admin Route: Get all registered bikers
+app.get('/api/admin/bikers', async (req, res) => {
+  try {
+    const bikers = await User.find({ role: 'biker' }).sort({ createdAt: -1 });
+    res.json(bikers);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Admin Route: Delete single ride
+app.delete('/api/rides/:id', async (req, res) => {
+  try {
+    await Ride.findByIdAndDelete(req.params.id);
+    io.emit('ride_deleted_broadcast', req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Clear All Active Rides
 app.delete('/api/rides/clear-all', async (req, res) => {
   try {
     await Ride.deleteMany({});
     io.emit('all_rides_cleared');
-    res.json({ success: true, message: 'All active rides cleared from live database.' });
+    res.json({ success: true, message: 'All active rides cleared.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
