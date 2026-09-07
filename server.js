@@ -22,7 +22,7 @@ if (!MONGO_URI) {
 
 mongoose.connect(MONGO_URI)
   .then(async () => {
-    console.log('MongoDB Cloud Atlas connected successfully.');
+    console.log('MongoDB Cloud Atlas connected successfully for SPCT Avengers.');
     try {
       await mongoose.connection.collection('users').dropIndex('email_1');
     } catch (e) {}
@@ -58,14 +58,14 @@ const rideSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 const Ride = mongoose.model('Ride', rideSchema);
 
-// In-Memory Live Rider GPS Positions
+// In-Memory Live Rider Positions
 const liveRiders = new Map();
 
 app.get('/', (req, res) => {
-  res.json({ message: 'SPCT Avengers Backend with Live Radar is live' });
+  res.json({ message: 'SPCT Avengers Backend with Live GPS Radar is live' });
 });
 
-// Google Authentication
+// Unified Google Login/Signup Endpoint
 app.post('/api/auth/google-login', async (req, res) => {
   const { fullName, email, avatar, phone, role, mode } = req.body;
   if (!email || !email.includes('@')) {
@@ -138,7 +138,7 @@ app.post('/api/auth/google-login', async (req, res) => {
   }
 });
 
-// Rides API
+// Trip Endpoints
 app.get('/api/rides', async (req, res) => {
   try {
     const rides = await Ride.find().sort({ createdAt: -1 });
@@ -177,9 +177,8 @@ app.delete('/api/rides/clear-all', async (req, res) => {
   }
 });
 
-// Socket.io with Live GPS Tracking and Auto-Hide Accepted Rides
+// Real-Time Socket Events
 io.on('connection', (socket) => {
-  // Rider broadcasts current GPS coordinates
   socket.on('update_rider_gps', (riderData) => {
     if (riderData && riderData.userId) {
       liveRiders.set(riderData.userId, {
@@ -189,6 +188,10 @@ io.on('connection', (socket) => {
       });
       io.emit('nearby_riders_update', Array.from(liveRiders.values()));
     }
+  });
+
+  socket.on('request_riders_refresh', () => {
+    socket.emit('nearby_riders_update', Array.from(liveRiders.values()));
   });
 
   socket.on('post_ride', async (rideData) => {
@@ -207,7 +210,6 @@ io.on('connection', (socket) => {
         { status: 'accepted', acceptedBy: accepter },
         { new: true }
       );
-      // Auto-removes from other riders instantly
       io.emit('ride_accepted_broadcast', updated);
     } catch (err) {
       console.error(err.message);
