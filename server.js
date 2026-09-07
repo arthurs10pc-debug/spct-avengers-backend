@@ -1,5 +1,4 @@
 const dns = require('dns');
-// Force IPv4 globally to completely stop ENETUNREACH on Render
 dns.setDefaultResultOrder('ipv4first');
 
 require('dotenv').config();
@@ -67,11 +66,15 @@ const Ride = mongoose.model('Ride', rideSchema);
 // In-memory OTP storage
 const otpStore = new Map();
 
-// --- Production Nodemailer Transporter (Render IPv4 Safe) ---
+// --- Production Nodemailer Transporter (Strict IPv4 Lookup Fix) ---
 const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
   port: 587,
   secure: false, // STARTTLS
+  lookup: (hostname, options, callback) => {
+    // Force direct IPv4 resolution to eliminate ENETUNREACH IPv6 routing errors
+    return dns.lookup(hostname, { family: 4 }, callback);
+  },
   auth: {
     user: (process.env.GMAIL_USER || 'arthurs10pc@gmail.com').trim(),
     pass: (process.env.GMAIL_APP_PASS || '').replace(/\s+/g, '')
@@ -97,7 +100,7 @@ app.get('/', (req, res) => {
   res.json({ message: 'SPCT Avengers Backend is running live.' });
 });
 
-// 1. Send OTP Endpoint (Detailed Error reporting)
+// 1. Send OTP Endpoint
 app.post('/api/auth/send-otp', async (req, res) => {
   const { email, name, fullName, phone, role } = req.body;
   const userName = name || fullName;
@@ -106,7 +109,6 @@ app.post('/api/auth/send-otp', async (req, res) => {
     return res.status(400).json({ error: 'Valid Gmail address is required.' });
   }
 
-  // Env variable check
   if (!process.env.GMAIL_APP_PASS) {
     return res.status(500).json({ 
       error: 'Backend Error: GMAIL_APP_PASS is missing in Render Environment Variables.' 
@@ -145,7 +147,6 @@ app.post('/api/auth/send-otp', async (req, res) => {
     return res.json({ success: true, message: 'OTP sent successfully.' });
   } catch (err) {
     console.error('Nodemailer error:', err);
-    // Send exact error message to frontend so user sees the reason directly on screen
     return res.status(500).json({ 
       error: `Email Dispatch Failed: ${err.message || 'SMTP Authentication / Network error'}` 
     });
