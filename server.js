@@ -84,7 +84,7 @@ const memoryRides = [];
 const memoryUsers = [];
 const memorySubscriptions = [];
 
-
+// Save Web Push Subscription
 app.post('/api/save-subscription', async (req, res) => {
   const subscription = req.body;
   if (!subscription || !subscription.endpoint) {
@@ -109,7 +109,7 @@ app.post('/api/save-subscription', async (req, res) => {
   }
 });
 
-
+// Admin endpoint to send notification permission alert to riders
 app.post('/api/admin/send-alert', async (req, res) => {
   const { targetEmail, targetPhone, title, body } = req.body;
   try {
@@ -205,7 +205,7 @@ app.post('/api/auth/google-login', async (req, res) => {
     }
 
     if (!user) {
-      return.status(400).json({ success: false, error: 'User account not found. Please register.' });
+      return res.status(400).json({ success: false, error: 'User account not found. Please register.' }); // Fixed typo here
     }
 
     res.json({ success: true, user });
@@ -213,7 +213,6 @@ app.post('/api/auth/google-login', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
 
 const liveRidersMap = new Map();
 
@@ -245,7 +244,6 @@ io.on('connection', (socket) => {
 
     io.emit('new_ride_broadcast', newRideData);
 
-   
     try {
       const pushPayload = JSON.stringify({
         title: "New Commute Request",
