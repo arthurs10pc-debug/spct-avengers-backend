@@ -1,166 +1,156 @@
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
-const mongoose = require('mongoose');
-const cors = require('cors');
 const { Server } = require('socket.io');
+const cors = require('cors');
+const mongoose = require('mongoose');
+const webpush = require('web-push');
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PATCH', 'DELETE'] }));
-app.use(express.json());
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "DELETE"]
+}));
+
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST', 'PATCH', 'DELETE'] }
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST", "DELETE"]
+  },
+  maxHttpBufferSize: 5e7,
+  transports: ['websocket', 'polling']
 });
 
-const MONGO_URI = process.env.MONGO_URI;
-if (!MONGO_URI) {
-  console.error('[ERROR] MONGO_URI is missing.');
+// Configure Web Push VAPID keys
+const publicVapidKey = process.env.VAPID_PUBLIC_KEY || 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-8vMeAtA5cHmDkJ0d8Q9cW4vG0mJ5M3Q5lK0P8vWq6X5LwG0J7j6W0Yg';
+const privateVapidKey = process.env.VAPID_PRIVATE_KEY || '1q8w7e6r5t4y3u2i1o0p9a8s7d6f5g4h3j2k1l0z9x8';
+
+try {
+  webpush.setVapidDetails('mailto:admin@spctavengers.com', publicVapidKey, privateVapidKey);
+} catch (e) {
+  console.log("VAPID setup warning:", e.message);
 }
 
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mongodb.net/spct_avengers?retryWrites=true&w=majority";
+
 mongoose.connect(MONGO_URI)
-  .then(async () => {
-    console.log('MongoDB Cloud Atlas connected successfully for SPCT Avengers.');
-    try {
-      await mongoose.connection.collection('users').dropIndex('email_1');
-    } catch (e) {}
-  })
-  .catch((err) => console.error('MongoDB Atlas connection error:', err.message));
+  .then(() => console.log("Connected to MongoDB successfully."))
+  .catch((err) => console.log("MongoDB connection fallback to memory:", err.message));
 
-const userSchema = new mongoose.Schema({
-  fullName: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
-  gmail: { type: String },
-  phone: { type: String, default: '' },
-  avatar: { type: String, default: '' },
-  role: { type: String, enum: ['biker', 'ride_taker', 'user'], default: 'ride_taker' },
-  createdAt: { type: Date, default: Date.now }
-});
-
+// Schemas
 const rideSchema = new mongoose.Schema({
-  creatorId: { type: String, required: true },
-  creatorName: { type: String, required: true },
-  creatorPhone: { type: String, required: true },
-  creatorRole: { type: String, required: true },
-  fromLocation: { type: String, required: true },
-  toLocation: { type: String, required: true },
-  status: { type: String, enum: ['active', 'accepted', 'completed'], default: 'active' },
+  creatorId: String,
+  creatorName: String,
+  creatorPhone: String,
+  creatorRole: String,
+  fromLocation: String,
+  toLocation: String,
+  status: { type: String, default: 'waiting' },
   acceptedBy: {
     name: String,
     phone: String,
     role: String
   },
-  createdAt: { type: Date, default: Date.now, expires: 7200 }
+  createdAt: { type: Date, default: Date.now }
 });
 
-const User = mongoose.model('User', userSchema);
+const userSchema = new mongoose.Schema({
+  fullName: String,
+  email: { type: String, unique: true },
+  phone: String,
+  avatar: String,
+  role: String,
+  createdAt: { type: Date, default: Date.now }
+});
+
+const subscriptionSchema = new mongoose.Schema({
+  endpoint: { type: String, unique: true },
+  keys: {
+    p256dh: String,
+    auth: String
+  }
+});
+
 const Ride = mongoose.model('Ride', rideSchema);
+const User = mongoose.model('User', userSchema);
+const PushSubscription = mongoose.model('PushSubscription', subscriptionSchema);
 
-// In-Memory Live Rider Positions
-const liveRiders = new Map();
+const memoryRides = [];
+const memoryUsers = [];
+const memorySubscriptions = [];
 
-app.get('/', (req, res) => {
-  res.json({ message: 'SPCT Avengers Backend with Live GPS Radar is live' });
-});
 
-// Unified Google Login/Signup Endpoint
-app.post('/api/auth/google-login', async (req, res) => {
-  const { fullName, email, avatar, phone, role, mode } = req.body;
-  if (!email || !email.includes('@')) {
-    return res.status(400).json({ error: 'Valid Gmail account required.' });
+app.post('/api/save-subscription', async (req, res) => {
+  const subscription = req.body;
+  if (!subscription || !subscription.endpoint) {
+    return res.status(400).json({ error: 'Invalid subscription object' });
   }
 
-  const cleanEmail = email.trim().toLowerCase();
-
   try {
-    let user = await User.findOne({ 
-      $or: [{ email: cleanEmail }, { gmail: cleanEmail }] 
-    });
-
-    if (mode === 'login') {
-      if (!user) {
-        return res.status(404).json({ error: 'No account found with this Gmail. Please Sign Up.' });
-      }
-      if (avatar && !user.avatar) user.avatar = avatar;
-      if (role) user.role = role;
-      user.email = cleanEmail;
-      user.gmail = cleanEmail;
-      await user.save();
-
-      return res.json({
-        success: true,
-        user: {
-          _id: user._id.toString(),
-          name: user.fullName,
-          email: cleanEmail,
-          phone: user.phone || '',
-          avatar: user.avatar,
-          role: user.role,
-          isAdmin: cleanEmail === 'arthurs10pc@gmail.com'
-        }
-      });
-    }
-
-    if (!user) {
-      user = await User.create({
-        fullName: fullName || 'Hostel Student',
-        email: cleanEmail,
-        gmail: cleanEmail,
-        phone: phone ? phone.trim() : '',
-        avatar: avatar || '',
-        role: role || 'ride_taker'
-      });
+    if (mongoose.connection.readyState === 1) {
+      await PushSubscription.findOneAndUpdate(
+        { endpoint: subscription.endpoint },
+        subscription,
+        { upsert: true, new: true }
+      );
     } else {
-      if (phone) user.phone = phone.trim();
-      if (role) user.role = role;
-      if (avatar) user.avatar = avatar;
-      user.email = cleanEmail;
-      user.gmail = cleanEmail;
-      await user.save();
-    }
-
-    return res.json({
-      success: true,
-      user: {
-        _id: user._id.toString(),
-        name: user.fullName,
-        email: cleanEmail,
-        phone: user.phone || '',
-        avatar: user.avatar,
-        role: user.role,
-        isAdmin: cleanEmail === 'arthurs10pc@gmail.com'
+      if (!memorySubscriptions.some(s => s.endpoint === subscription.endpoint)) {
+        memorySubscriptions.push(subscription);
       }
-    });
+    }
+    res.status(201).json({ success: true, message: 'Subscription saved successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Trip Endpoints
+
+app.post('/api/admin/send-alert', async (req, res) => {
+  const { targetEmail, targetPhone, title, body } = req.body;
+  try {
+    const payload = JSON.stringify({ title, body });
+    const subscriptions = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
+
+    subscriptions.forEach(sub => {
+      webpush.sendNotification(sub, payload).catch(err => {
+        console.error("Push alert send error:", err.message);
+      });
+    });
+
+    res.json({ success: true, message: "Alert dispatched to push subscribers." });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/rides', async (req, res) => {
   try {
-    const rides = await Ride.find().sort({ createdAt: -1 });
-    res.json(rides);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/admin/bikers', async (req, res) => {
-  try {
-    const bikers = await User.find({ role: 'biker' }).sort({ createdAt: -1 });
-    res.json(bikers);
+    if (mongoose.connection.readyState === 1) {
+      const rides = await Ride.find().sort({ createdAt: -1 }).lean();
+      res.json(rides);
+    } else {
+      res.json(memoryRides.slice().reverse());
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.delete('/api/rides/:id', async (req, res) => {
+  const { id } = req.params;
   try {
-    await Ride.findByIdAndDelete(req.params.id);
-    io.emit('ride_deleted_broadcast', req.params.id);
+    if (mongoose.connection.readyState === 1) {
+      await Ride.findByIdAndDelete(id);
+    } else {
+      const idx = memoryRides.findIndex(r => r._id === id);
+      if (idx !== -1) memoryRides.splice(idx, 1);
+    }
+    io.emit('ride_deleted_broadcast', id);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -169,65 +159,146 @@ app.delete('/api/rides/:id', async (req, res) => {
 
 app.delete('/api/rides/clear-all', async (req, res) => {
   try {
-    await Ride.deleteMany({});
+    if (mongoose.connection.readyState === 1) {
+      await Ride.deleteMany({});
+    } else {
+      memoryRides.length = 0;
+    }
     io.emit('all_rides_cleared');
-    res.json({ success: true, message: 'All active rides cleared.' });
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Real-Time Socket Events
+app.get('/api/admin/bikers', async (req, res) => {
+  try {
+    if (mongoose.connection.readyState === 1) {
+      const bikers = await User.find({ role: 'biker' }).lean();
+      res.json(bikers);
+    } else {
+      res.json(memoryUsers.filter(u => u.role === 'biker'));
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/google-login', async (req, res) => {
+  const { fullName, email, avatar, phone, role, mode } = req.body;
+  try {
+    let user = null;
+    if (mongoose.connection.readyState === 1) {
+      user = await User.findOne({ email });
+      if (!user && mode === 'signup') {
+        user = await User.create({ fullName, email, avatar, phone, role });
+      } else if (user && phone && !user.phone) {
+        user.phone = phone;
+        await user.save();
+      }
+    } else {
+      user = memoryUsers.find(u => u.email === email);
+      if (!user && mode === 'signup') {
+        user = { _id: 'usr_' + Date.now(), fullName, email, avatar, phone, role };
+        memoryUsers.push(user);
+      }
+    }
+
+    if (!user) {
+      return.status(400).json({ success: false, error: 'User account not found. Please register.' });
+    }
+
+    res.json({ success: true, user });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+const liveRidersMap = new Map();
+
 io.on('connection', (socket) => {
-  socket.on('update_rider_gps', (riderData) => {
-    if (riderData && riderData.userId) {
-      liveRiders.set(riderData.userId, {
-        ...riderData,
-        socketId: socket.id,
-        lastUpdated: Date.now()
-      });
-      io.emit('nearby_riders_update', Array.from(liveRiders.values()));
+  socket.on('update_rider_gps', (data) => {
+    if (data && data.userId) {
+      liveRidersMap.set(data.userId, { ...data, socketId: socket.id, lastUpdated: Date.now() });
+      io.emit('nearby_riders_update', Array.from(liveRidersMap.values()));
     }
   });
 
   socket.on('request_riders_refresh', () => {
-    socket.emit('nearby_riders_update', Array.from(liveRiders.values()));
+    io.emit('nearby_riders_update', Array.from(liveRidersMap.values()));
   });
 
-  socket.on('post_ride', async (rideData) => {
-    try {
-      const newRide = await Ride.create(rideData);
-      io.emit('new_ride_broadcast', newRide);
-    } catch (err) {
-      console.error(err.message);
+  socket.on('post_ride', async (payload) => {
+    const newRideData = {
+      _id: new mongoose.Types.ObjectId().toString(),
+      ...payload,
+      status: 'waiting',
+      createdAt: new Date()
+    };
+
+    if (mongoose.connection.readyState === 1) {
+      Ride.create(newRideData).catch(() => {});
+    } else {
+      memoryRides.push(newRideData);
     }
+
+    io.emit('new_ride_broadcast', newRideData);
+
+   
+    try {
+      const pushPayload = JSON.stringify({
+        title: "New Commute Request",
+        body: `Route: ${payload.fromLocation} to ${payload.toLocation}`
+      });
+      const subs = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
+      subs.forEach(sub => {
+        webpush.sendNotification(sub, pushPayload).catch(() => {});
+      });
+    } catch (e) {}
   });
 
   socket.on('accept_ride', async ({ rideId, accepter }) => {
     try {
-      const updated = await Ride.findByIdAndUpdate(
-        rideId,
-        { status: 'accepted', acceptedBy: accepter },
-        { new: true }
-      );
-      io.emit('ride_accepted_broadcast', updated);
+      let updatedRide = null;
+      if (mongoose.connection.readyState === 1) {
+        updatedRide = await Ride.findByIdAndUpdate(
+          rideId,
+          { status: 'accepted', acceptedBy: accepter },
+          { new: true }
+        ).lean();
+      } else {
+        const ride = memoryRides.find(r => r._id === rideId);
+        if (ride) {
+          ride.status = 'accepted';
+          ride.acceptedBy = accepter;
+          updatedRide = ride;
+        }
+      }
+
+      if (updatedRide) {
+        io.emit('ride_accepted_broadcast', updatedRide);
+      }
     } catch (err) {
-      console.error(err.message);
+      console.error("Accept ride error:", err);
     }
+  });
+
+  socket.on('send_in_app_chat', (msg) => {
+    io.emit('receive_in_app_chat', msg);
   });
 
   socket.on('disconnect', () => {
-    for (const [userId, rider] of liveRiders.entries()) {
-      if (rider.socketId === socket.id) {
-        liveRiders.delete(userId);
-        io.emit('nearby_riders_update', Array.from(liveRiders.values()));
-        break;
+    for (let [userId, val] of liveRidersMap.entries()) {
+      if (val.socketId === socket.id) {
+        liveRidersMap.delete(userId);
       }
     }
+    io.emit('nearby_riders_update', Array.from(liveRidersMap.values()));
   });
 });
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`SPCT Avengers Backend running on port ${PORT}`);
 });
