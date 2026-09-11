@@ -26,7 +26,6 @@ const io = new Server(server, {
   transports: ['websocket', 'polling']
 });
 
-// Configure Web Push VAPID keys
 const publicVapidKey = process.env.VAPID_PUBLIC_KEY || 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-8vMeAtA5cHmDkJ0d8Q9cW4vG0mJ5M3Q5lK0P8vWq6X5LwG0J7j6W0Yg';
 const privateVapidKey = process.env.VAPID_PRIVATE_KEY || '1q8w7e6r5t4y3u2i1o0p9a8s7d6f5g4h3j2k1l0z9x8';
 
@@ -42,7 +41,6 @@ mongoose.connect(MONGO_URI)
   .then(() => console.log("Connected to MongoDB successfully."))
   .catch((err) => console.log("MongoDB connection fallback to memory:", err.message));
 
-// Schemas
 const rideSchema = new mongoose.Schema({
   creatorId: String,
   creatorName: String,
@@ -84,7 +82,6 @@ const memoryRides = [];
 const memoryUsers = [];
 const memorySubscriptions = [];
 
-// Save Web Push Subscription
 app.post('/api/save-subscription', async (req, res) => {
   const subscription = req.body;
   if (!subscription || !subscription.endpoint) {
@@ -103,17 +100,17 @@ app.post('/api/save-subscription', async (req, res) => {
         memorySubscriptions.push(subscription);
       }
     }
+    console.log("Push subscription saved successfully.");
     res.status(201).json({ success: true, message: 'Subscription saved successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Admin endpoint to send notification permission alert to riders
 app.post('/api/admin/send-alert', async (req, res) => {
-  const { targetEmail, targetPhone, title, body } = req.body;
+  const { title, body } = req.body;
   try {
-    const payload = JSON.stringify({ title, body });
+    const payload = JSON.stringify({ title: title || "Alert", body: body || "Notification alert" });
     const subscriptions = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
 
     subscriptions.forEach(sub => {
@@ -205,7 +202,7 @@ app.post('/api/auth/google-login', async (req, res) => {
     }
 
     if (!user) {
-      return res.status(400).json({ success: false, error: 'User account not found. Please register.' }); // Fixed typo here
+      return res.status(400).json({ success: false, error: 'User account not found. Please register.' });
     }
 
     res.json({ success: true, user });
@@ -250,10 +247,16 @@ io.on('connection', (socket) => {
         body: `Route: ${payload.fromLocation} to ${payload.toLocation}`
       });
       const subs = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
+      console.log(`Broadcasting push notification to ${subs.length} subscribers.`);
+      
       subs.forEach(sub => {
-        webpush.sendNotification(sub, pushPayload).catch(() => {});
+        webpush.sendNotification(sub, pushPayload).catch(err => {
+          console.error("Error sending push to endpoint:", err.message);
+        });
       });
-    } catch (e) {}
+    } catch (e) {
+      console.error("Push broadcast general error:", e.message);
+    }
   });
 
   socket.on('accept_ride', async ({ rideId, accepter }) => {
