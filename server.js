@@ -26,8 +26,8 @@ const io = new Server(server, {
   transports: ['websocket', 'polling']
 });
 
-const publicVapidKey = process.env.VAPID_PUBLIC_KEY || 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-8vMeAtA5cHmDkJ0d8Q9cW4vG0mJ5M3Q5lK0P8vWq6X5LwG0J7j6W0Yg';
-const privateVapidKey = process.env.VAPID_PRIVATE_KEY || '1q8w7e6r5t4y3u2i1o0p9a8s7d6f5g4h3j2k1l0z9x8';
+const publicVapidKey = process.env.VAPID_PUBLIC_KEY || 'BKnGwCb7MAP4ancXdc4cV2oMaD9iF5EqLfgotpIHFH8ZT7LO8weEeIqHANDMCpwVohpCiompbhEh2Xjb93mS8pUw';
+const privateVapidKey = process.env.VAPID_PRIVATE_KEY || '4hYeB-lD8KFZObFS-3p75qjrQbGu4hv-clq_jpLmRCY';
 
 try {
   webpush.setVapidDetails('mailto:admin@spctavengers.com', publicVapidKey, privateVapidKey);
