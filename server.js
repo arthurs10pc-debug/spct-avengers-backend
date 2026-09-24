@@ -247,7 +247,6 @@ io.on('connection', (socket) => {
         body: `Route: ${payload.fromLocation} to ${payload.toLocation}`
       });
       const subs = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
-      console.log(`Broadcasting push notification to ${subs.length} subscribers.`);
       
       subs.forEach(sub => {
         webpush.sendNotification(sub, pushPayload).catch(err => {
@@ -285,8 +284,20 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('send_in_app_chat', (msg) => {
+  // Chat message event with push notification trigger
+  socket.on('send_in_app_chat', async (msg) => {
     io.emit('receive_in_app_chat', msg);
+
+    try {
+      const pushPayload = JSON.stringify({
+        title: `Message from ${msg.senderName || 'Partner'}`,
+        body: msg.text
+      });
+      const subs = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
+      subs.forEach(sub => {
+        webpush.sendNotification(sub, pushPayload).catch(() => {});
+      });
+    } catch (e) {}
   });
 
   socket.on('disconnect', () => {
