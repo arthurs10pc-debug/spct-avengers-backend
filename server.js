@@ -284,7 +284,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Chat message event with push notification trigger
   socket.on('send_in_app_chat', async (msg) => {
     io.emit('receive_in_app_chat', msg);
 
