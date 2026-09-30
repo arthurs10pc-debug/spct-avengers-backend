@@ -100,7 +100,6 @@ app.post('/api/save-subscription', async (req, res) => {
         memorySubscriptions.push(subscription);
       }
     }
-    console.log("Push subscription saved successfully.");
     res.status(201).json({ success: true, message: 'Subscription saved successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -114,9 +113,7 @@ app.post('/api/admin/send-alert', async (req, res) => {
     const subscriptions = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
 
     subscriptions.forEach(sub => {
-      webpush.sendNotification(sub, payload).catch(err => {
-        console.error("Push alert send error:", err.message);
-      });
+      webpush.sendNotification(sub, payload).catch(() => {});
     });
 
     res.json({ success: true, message: "Alert dispatched to push subscribers." });
@@ -249,13 +246,9 @@ io.on('connection', (socket) => {
       const subs = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
       
       subs.forEach(sub => {
-        webpush.sendNotification(sub, pushPayload).catch(err => {
-          console.error("Error sending push to endpoint:", err.message);
-        });
+        webpush.sendNotification(sub, pushPayload).catch(() => {});
       });
-    } catch (e) {
-      console.error("Push broadcast general error:", e.message);
-    }
+    } catch (e) {}
   });
 
   socket.on('accept_ride', async ({ rideId, accepter }) => {
@@ -279,9 +272,7 @@ io.on('connection', (socket) => {
       if (updatedRide) {
         io.emit('ride_accepted_broadcast', updatedRide);
       }
-    } catch (err) {
-      console.error("Accept ride error:", err);
-    }
+    } catch (err) {}
   });
 
   socket.on('send_in_app_chat', async (msg) => {
