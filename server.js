@@ -9,19 +9,12 @@ const webpush = require('web-push');
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "DELETE"]
-}));
-
+app.use(cors({ origin: "*", methods: ["GET", "POST", "DELETE"] }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST", "DELETE"]
-  },
+  cors: { origin: "*", methods: ["GET", "POST", "DELETE"] },
   maxHttpBufferSize: 5e7,
   transports: ['websocket', 'polling']
 });
@@ -31,9 +24,7 @@ const privateVapidKey = process.env.VAPID_PRIVATE_KEY || '4hYeB-lD8KFZObFS-3p75q
 
 try {
   webpush.setVapidDetails('mailto:admin@spctavengers.com', publicVapidKey, privateVapidKey);
-} catch (e) {
-  console.log("VAPID setup warning:", e.message);
-}
+} catch (e) {}
 
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mongodb.net/spct_avengers?retryWrites=true&w=majority";
 
@@ -49,11 +40,7 @@ const rideSchema = new mongoose.Schema({
   fromLocation: String,
   toLocation: String,
   status: { type: String, default: 'waiting' },
-  acceptedBy: {
-    name: String,
-    phone: String,
-    role: String
-  },
+  acceptedBy: { name: String, phone: String, role: String },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -68,10 +55,7 @@ const userSchema = new mongoose.Schema({
 
 const subscriptionSchema = new mongoose.Schema({
   endpoint: { type: String, unique: true },
-  keys: {
-    p256dh: String,
-    auth: String
-  }
+  keys: { p256dh: String, auth: String }
 });
 
 const Ride = mongoose.model('Ride', rideSchema);
@@ -84,39 +68,14 @@ const memorySubscriptions = [];
 
 app.post('/api/save-subscription', async (req, res) => {
   const subscription = req.body;
-  if (!subscription || !subscription.endpoint) {
-    return res.status(400).json({ error: 'Invalid subscription object' });
-  }
-
+  if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Invalid' });
   try {
     if (mongoose.connection.readyState === 1) {
-      await PushSubscription.findOneAndUpdate(
-        { endpoint: subscription.endpoint },
-        subscription,
-        { upsert: true, new: true }
-      );
+      await PushSubscription.findOneAndUpdate({ endpoint: subscription.endpoint }, subscription, { upsert: true, new: true });
     } else {
-      if (!memorySubscriptions.some(s => s.endpoint === subscription.endpoint)) {
-        memorySubscriptions.push(subscription);
-      }
+      if (!memorySubscriptions.some(s => s.endpoint === subscription.endpoint)) memorySubscriptions.push(subscription);
     }
-    res.status(201).json({ success: true, message: 'Subscription saved successfully' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/admin/send-alert', async (req, res) => {
-  const { title, body } = req.body;
-  try {
-    const payload = JSON.stringify({ title: title || "Alert", body: body || "Notification alert" });
-    const subscriptions = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
-
-    subscriptions.forEach(sub => {
-      webpush.sendNotification(sub, payload).catch(() => {});
-    });
-
-    res.json({ success: true, message: "Alert dispatched to push subscribers." });
+    res.status(201).json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -197,11 +156,7 @@ app.post('/api/auth/google-login', async (req, res) => {
         memoryUsers.push(user);
       }
     }
-
-    if (!user) {
-      return res.status(400).json({ success: false, error: 'User account not found. Please register.' });
-    }
-
+    if (!user) return res.status(400).json({ success: false, error: 'User not found' });
     res.json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -240,11 +195,10 @@ io.on('connection', (socket) => {
 
     try {
       const pushPayload = JSON.stringify({
-        title: "New Commute Request",
-        body: `Route: ${payload.fromLocation} to ${payload.toLocation}`
+        title: "New Ride Request!",
+        body: `From: ${payload.fromLocation} To: ${payload.toLocation}`
       });
       const subs = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
-      
       subs.forEach(sub => {
         webpush.sendNotification(sub, pushPayload).catch(() => {});
       });
@@ -255,11 +209,7 @@ io.on('connection', (socket) => {
     try {
       let updatedRide = null;
       if (mongoose.connection.readyState === 1) {
-        updatedRide = await Ride.findByIdAndUpdate(
-          rideId,
-          { status: 'accepted', acceptedBy: accepter },
-          { new: true }
-        ).lean();
+        updatedRide = await Ride.findByIdAndUpdate(rideId, { status: 'accepted', acceptedBy: accepter }, { new: true }).lean();
       } else {
         const ride = memoryRides.find(r => r._id === rideId);
         if (ride) {
@@ -268,10 +218,7 @@ io.on('connection', (socket) => {
           updatedRide = ride;
         }
       }
-
-      if (updatedRide) {
-        io.emit('ride_accepted_broadcast', updatedRide);
-      }
+      if (updatedRide) io.emit('ride_accepted_broadcast', updatedRide);
     } catch (err) {}
   });
 
@@ -292,9 +239,7 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     for (let [userId, val] of liveRidersMap.entries()) {
-      if (val.socketId === socket.id) {
-        liveRidersMap.delete(userId);
-      }
+      if (val.socketId === socket.id) liveRidersMap.delete(userId);
     }
     io.emit('nearby_riders_update', Array.from(liveRidersMap.values()));
   });
