@@ -4,7 +4,6 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const webpush = require('web-push');
 
 const app = express();
 const server = http.createServer(app);
@@ -18,13 +17,6 @@ const io = new Server(server, {
   maxHttpBufferSize: 5e7,
   transports: ['websocket', 'polling']
 });
-
-const publicVapidKey = process.env.VAPID_PUBLIC_KEY || 'BKnGwCb7MAP4ancXdc4cV2oMaD9iF5EqLfgotpIHFH8ZT7LO8weEeIqHANDMCpwVohpCiompbhEh2Xjb93mS8pUw';
-const privateVapidKey = process.env.VAPID_PRIVATE_KEY || '4hYeB-lD8KFZObFS-3p75qjrQbGu4hv-clq_jpLmRCY';
-
-try {
-  webpush.setVapidDetails('mailto:admin@spctavengers.com', publicVapidKey, privateVapidKey);
-} catch (e) {}
 
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mongodb.net/spct_avengers?retryWrites=true&w=majority";
 
@@ -53,33 +45,11 @@ const userSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-const subscriptionSchema = new mongoose.Schema({
-  endpoint: { type: String, unique: true },
-  keys: { p256dh: String, auth: String }
-});
-
 const Ride = mongoose.model('Ride', rideSchema);
 const User = mongoose.model('User', userSchema);
-const PushSubscription = mongoose.model('PushSubscription', subscriptionSchema);
 
 const memoryRides = [];
 const memoryUsers = [];
-const memorySubscriptions = [];
-
-app.post('/api/save-subscription', async (req, res) => {
-  const subscription = req.body;
-  if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Invalid' });
-  try {
-    if (mongoose.connection.readyState === 1) {
-      await PushSubscription.findOneAndUpdate({ endpoint: subscription.endpoint }, subscription, { upsert: true, new: true });
-    } else {
-      if (!memorySubscriptions.some(s => s.endpoint === subscription.endpoint)) memorySubscriptions.push(subscription);
-    }
-    res.status(201).json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 app.get('/api/rides', async (req, res) => {
   try {
@@ -192,17 +162,6 @@ io.on('connection', (socket) => {
     }
 
     io.emit('new_ride_broadcast', newRideData);
-
-    try {
-      const pushPayload = JSON.stringify({
-        title: "New Ride Request!",
-        body: `From: ${payload.fromLocation} To: ${payload.toLocation}`
-      });
-      const subs = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
-      subs.forEach(sub => {
-        webpush.sendNotification(sub, pushPayload).catch(() => {});
-      });
-    } catch (e) {}
   });
 
   socket.on('accept_ride', async ({ rideId, accepter }) => {
@@ -224,17 +183,6 @@ io.on('connection', (socket) => {
 
   socket.on('send_in_app_chat', async (msg) => {
     io.emit('receive_in_app_chat', msg);
-
-    try {
-      const pushPayload = JSON.stringify({
-        title: `Message from ${msg.senderName || 'Partner'}`,
-        body: msg.text
-      });
-      const subs = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
-      subs.forEach(sub => {
-        webpush.sendNotification(sub, pushPayload).catch(() => {});
-      });
-    } catch (e) {}
   });
 
   socket.on('disconnect', () => {
