@@ -19,7 +19,6 @@ const io = new Server(server, {
   transports: ['websocket', 'polling']
 });
 
-// VAPID Keys updated with your provided key
 const publicVapidKey = process.env.VAPID_PUBLIC_KEY || 'BNp5iirw54SBOS_8VOAKw7gpSzvkktgKWNzq_mDeAztqClikXufNCdCHk_vvB7cSD-djbSQXosHRzEtMERwEQhQ';
 const privateVapidKey = process.env.VAPID_PRIVATE_KEY || '4hYeB-lD8KFZObFS-3p75qjrQbGu4hv-clq_jpLmRCY';
 
