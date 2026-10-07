@@ -50,6 +50,8 @@ const userSchema = new mongoose.Schema({
   phone: String,
   avatar: String,
   role: String,
+  notificationAllowed: { type: Boolean, default: true },
+  gpsAllowed: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -76,6 +78,18 @@ app.post('/api/save-subscription', async (req, res) => {
       if (!memorySubscriptions.some(s => s.endpoint === subscription.endpoint)) memorySubscriptions.push(subscription);
     }
     res.status(201).json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/report-permission', async (req, res) => {
+  const { userId, notificationAllowed, gpsAllowed } = req.body;
+  try {
+    if (mongoose.connection.readyState === 1 && userId) {
+      await User.findByIdAndUpdate(userId, { notificationAllowed, gpsAllowed });
+    }
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -124,14 +138,29 @@ app.delete('/api/rides/clear-all', async (req, res) => {
   }
 });
 
-app.get('/api/admin/bikers', async (req, res) => {
+app.get('/api/admin/users', async (req, res) => {
   try {
     if (mongoose.connection.readyState === 1) {
-      const bikers = await User.find({ role: 'biker' }).lean();
-      res.json(bikers);
+      const users = await User.find().lean();
+      res.json(users);
     } else {
-      res.json(memoryUsers.filter(u => u.role === 'biker'));
+      res.json(memoryUsers);
     }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/users/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    if (mongoose.connection.readyState === 1) {
+      await User.findByIdAndDelete(id);
+    } else {
+      const idx = memoryUsers.findIndex(u => u._id === id);
+      if (idx !== -1) memoryUsers.splice(idx, 1);
+    }
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -144,7 +173,7 @@ app.post('/api/auth/google-login', async (req, res) => {
     if (mongoose.connection.readyState === 1) {
       user = await User.findOne({ email });
       if (!user && mode === 'signup') {
-        user = await User.create({ fullName, email, avatar, phone, role });
+        user = await User.create({ fullName, email, avatar, phone, role, notificationAllowed: true, gpsAllowed: true });
       } else if (user && phone && !user.phone) {
         user.phone = phone;
         await user.save();
@@ -152,7 +181,7 @@ app.post('/api/auth/google-login', async (req, res) => {
     } else {
       user = memoryUsers.find(u => u.email === email);
       if (!user && mode === 'signup') {
-        user = { _id: 'usr_' + Date.now(), fullName, email, avatar, phone, role };
+        user = { _id: 'usr_' + Date.now(), fullName, email, avatar, phone, role, notificationAllowed: true, gpsAllowed: true };
         memoryUsers.push(user);
       }
     }
@@ -195,7 +224,7 @@ io.on('connection', (socket) => {
 
     try {
       const pushPayload = JSON.stringify({
-        title: "🚨 High Priority Ride Request!",
+        title: "High Priority Ride Request",
         body: `From: ${payload.fromLocation} To: ${payload.toLocation}`
       });
       const subs = mongoose.connection.readyState === 1 ? await PushSubscription.find() : memorySubscriptions;
