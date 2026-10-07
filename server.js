@@ -205,6 +205,17 @@ io.on('connection', (socket) => {
     } catch (e) {}
   });
 
+  // Manual Ping/Ring button handler for Ride Taker
+  socket.on('ping_riders', (data) => {
+    io.emit('new_ride_broadcast', {
+      _id: data.rideId || Date.now(),
+      fromLocation: data.from,
+      toLocation: data.to,
+      creatorName: data.passenger,
+      status: 'waiting'
+    });
+  });
+
   socket.on('accept_ride', async ({ rideId, accepter }) => {
     try {
       let updatedRide = null;
