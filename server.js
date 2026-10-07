@@ -205,7 +205,6 @@ io.on('connection', (socket) => {
     } catch (e) {}
   });
 
-  // Manual Ping/Ring button handler for Ride Taker
   socket.on('ping_riders', (data) => {
     io.emit('new_ride_broadcast', {
       _id: data.rideId || Date.now(),
