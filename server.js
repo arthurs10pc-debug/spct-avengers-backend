@@ -171,6 +171,24 @@ app.get('/api/admin/export-db', async (req, res) => {
   }
 });
 
+app.post('/api/admin/clear-full-db', async (req, res) => {
+  try {
+    if (mongoose.connection.readyState === 1) {
+      await User.deleteMany({});
+      await Ride.deleteMany({});
+      await PushSubscription.deleteMany({});
+    } else {
+      memoryUsers.length = 0;
+      memoryRides.length = 0;
+      memorySubscriptions.length = 0;
+    }
+    io.emit('db_cleared_broadcast');
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/admin/users/:id', async (req, res) => {
   const { id } = req.params;
   try {
