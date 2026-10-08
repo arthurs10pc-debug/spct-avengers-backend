@@ -160,6 +160,7 @@ app.delete('/api/admin/users/:id', async (req, res) => {
       const idx = memoryUsers.findIndex(u => u._id === id);
       if (idx !== -1) memoryUsers.splice(idx, 1);
     }
+    io.emit('user_deleted_broadcast', id);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
