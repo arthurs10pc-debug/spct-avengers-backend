@@ -151,6 +151,26 @@ app.get('/api/admin/users', async (req, res) => {
   }
 });
 
+app.get('/api/admin/export-db', async (req, res) => {
+  try {
+    let users = [];
+    let rides = [];
+    let subscriptions = [];
+    if (mongoose.connection.readyState === 1) {
+      users = await User.find().lean();
+      rides = await Ride.find().lean();
+      subscriptions = await PushSubscription.find().lean();
+    } else {
+      users = memoryUsers;
+      rides = memoryRides;
+      subscriptions = memorySubscriptions;
+    }
+    res.json({ exportTimestamp: new Date(), totalUsers: users.length, totalRides: rides.length, users, rides, subscriptions });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/admin/users/:id', async (req, res) => {
   const { id } = req.params;
   try {
