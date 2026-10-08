@@ -47,7 +47,7 @@ const rideSchema = new mongoose.Schema({
 const userSchema = new mongoose.Schema({
   fullName: String,
   email: { type: String, unique: true },
-  phone: String,
+  phone: { type: String, unique: true },
   avatar: String,
   role: String,
   notificationAllowed: { type: Boolean, default: true },
@@ -173,14 +173,25 @@ app.post('/api/auth/google-login', async (req, res) => {
     if (mongoose.connection.readyState === 1) {
       user = await User.findOne({ email });
       if (!user && mode === 'signup') {
+        const phoneExists = await User.findOne({ phone });
+        if (phoneExists) {
+          return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
+        }
         user = await User.create({ fullName, email, avatar, phone, role, notificationAllowed: true, gpsAllowed: true });
       } else if (user && phone && !user.phone) {
+        const phoneExists = await User.findOne({ phone });
+        if (phoneExists && phoneExists._id.toString() !== user._id.toString()) {
+          return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
+        }
         user.phone = phone;
         await user.save();
       }
     } else {
       user = memoryUsers.find(u => u.email === email);
       if (!user && mode === 'signup') {
+        if (memoryUsers.some(u => u.phone === phone)) {
+          return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
+        }
         user = { _id: 'usr_' + Date.now(), fullName, email, avatar, phone, role, notificationAllowed: true, gpsAllowed: true };
         memoryUsers.push(user);
       }
