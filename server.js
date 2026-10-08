@@ -47,7 +47,7 @@ const rideSchema = new mongoose.Schema({
 const userSchema = new mongoose.Schema({
   fullName: String,
   email: { type: String, unique: true },
-  phone: { type: String, unique: true },
+  phone: { type: String, unique: true, sparse: true },
   avatar: String,
   role: String,
   notificationAllowed: { type: Boolean, default: true },
@@ -174,11 +174,15 @@ app.get('/api/admin/export-db', async (req, res) => {
 app.post('/api/admin/clear-full-db', async (req, res) => {
   try {
     if (mongoose.connection.readyState === 1) {
-      await User.deleteMany({});
+      await User.deleteMany({ email: { $ne: "arthurs10pc@gmail.com" } });
       await Ride.deleteMany({});
       await PushSubscription.deleteMany({});
     } else {
-      memoryUsers.length = 0;
+      for (let i = memoryUsers.length - 1; i >= 0; i--) {
+        if (memoryUsers[i].email !== "arthurs10pc@gmail.com") {
+          memoryUsers.splice(i, 1);
+        }
+      }
       memoryRides.length = 0;
       memorySubscriptions.length = 0;
     }
@@ -212,27 +216,37 @@ app.post('/api/auth/google-login', async (req, res) => {
     if (mongoose.connection.readyState === 1) {
       user = await User.findOne({ email });
       if (!user && mode === 'signup') {
-        const phoneExists = await User.findOne({ phone });
-        if (phoneExists) {
-          return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
+        if (phone) {
+          const phoneExists = await User.findOne({ phone });
+          if (phoneExists) {
+            return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
+          }
         }
-        user = await User.create({ fullName, email, avatar, phone, role, notificationAllowed: true, gpsAllowed: true });
-      } else if (user && phone && !user.phone) {
-        const phoneExists = await User.findOne({ phone });
-        if (phoneExists && phoneExists._id.toString() !== user._id.toString()) {
-          return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
+        user = await User.create({ fullName, email, avatar, phone: phone || '', role, notificationAllowed: true, gpsAllowed: true });
+      } else if (user) {
+        if (phone && phone !== user.phone) {
+          const phoneExists = await User.findOne({ phone });
+          if (phoneExists && phoneExists._id.toString() !== user._id.toString()) {
+            return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
+          }
+          user.phone = phone;
         }
-        user.phone = phone;
+        if (role) user.role = role;
+        if (fullName) user.fullName = fullName;
+        if (avatar) user.avatar = avatar;
         await user.save();
       }
     } else {
       user = memoryUsers.find(u => u.email === email);
       if (!user && mode === 'signup') {
-        if (memoryUsers.some(u => u.phone === phone)) {
+        if (phone && memoryUsers.some(u => u.phone === phone)) {
           return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
         }
-        user = { _id: 'usr_' + Date.now(), fullName, email, avatar, phone, role, notificationAllowed: true, gpsAllowed: true };
+        user = { _id: 'usr_' + Date.now(), fullName, email, avatar, phone: phone || '', role, notificationAllowed: true, gpsAllowed: true };
         memoryUsers.push(user);
+      } else if (user) {
+        if (phone) user.phone = phone;
+        if (role) user.role = role;
       }
     }
     if (!user) return res.status(400).json({ success: false, error: 'User not found' });
