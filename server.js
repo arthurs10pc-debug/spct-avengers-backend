@@ -61,7 +61,12 @@ const subscriptionSchema = new mongoose.Schema({
 });
 
 const noticeSchema = new mongoose.Schema({
-  notices: [String],
+  notices: [
+    {
+      type: { type: String, default: 'text' },
+      content: String
+    }
+  ],
   updatedAt: { type: Date, default: Date.now }
 });
 
@@ -74,9 +79,9 @@ const memoryRides = [];
 const memoryUsers = [];
 const memorySubscriptions = [];
 let memoryNotices = [
-  "System Notice: Kindly allow all notifications & location permissions for seamless ride coordination.",
-  "Operational Update: Keep GPS active so nearby pilots can accurately track active commutes.",
-  "Security Advisory: Verify partner credentials and mobile numbers prior to trip commencement."
+  { type: 'text', content: 'System Notice: Kindly allow all notifications & location permissions for seamless ride coordination.' },
+  { type: 'text', content: 'Operational Update: Keep GPS active so nearby pilots can accurately track active commutes.' },
+  { type: 'text', content: 'Security Advisory: Verify partner credentials and mobile numbers prior to trip commencement.' }
 ];
 
 app.post('/api/save-subscription', async (req, res) => {
@@ -363,30 +368,8 @@ io.on('connection', (socket) => {
       if (mongoose.connection.readyState === 1) {
         updatedRide = await Ride.findByIdAndUpdate(rideId, { status: 'accepted', acceptedBy: accepter }, { new: true }).lean();
       } else {
-        const ride = memoryRides.memoryRides.find(r => r._id === rideId);
+        const ride = memoryRides.find(r => r._id === rideId);
         if (ride) {
           ride.status = 'accepted';
           ride.acceptedBy = accepter;
           updatedRide = ride;
-        }
-      }
-      if (updatedRide) io.emit('ride_accepted_broadcast', updatedRide);
-    } catch (err) {}
-  });
-
-  socket.on('send_in_app_chat', async (msg) => {
-    io.emit('receive_in_app_chat', msg);
-  });
-
-  socket.on('disconnect', () => {
-    for (let [userId, val] of liveRidersMap.entries()) {
-      if (val.socketId === socket.id) liveRidersMap.delete(userId);
-    }
-    io.emit('nearby_riders_update', Array.from(liveRidersMap.values()));
-  });
-});
-
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`SPCT Avengers Backend running on port ${PORT}`);
-});
