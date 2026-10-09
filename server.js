@@ -80,8 +80,7 @@ const memoryUsers = [];
 const memorySubscriptions = [];
 let memoryNotices = [
   { type: 'text', content: 'System Notice: Kindly allow all notifications & location permissions for seamless ride coordination.' },
-  { type: 'text', content: 'Operational Update: Keep GPS active so nearby pilots can accurately track active commutes.' },
-  { type: 'text', content: 'Security Advisory: Verify partner credentials and mobile numbers prior to trip commencement.' }
+  { type: 'text', content: 'Operational Update: Keep GPS active so nearby pilots can accurately track active commutes.' }
 ];
 
 app.post('/api/save-subscription', async (req, res) => {
