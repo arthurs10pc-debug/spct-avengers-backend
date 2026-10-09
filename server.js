@@ -373,3 +373,25 @@ io.on('connection', (socket) => {
           ride.status = 'accepted';
           ride.acceptedBy = accepter;
           updatedRide = ride;
+        }
+      }
+      if (updatedRide) io.emit('ride_accepted_broadcast', updatedRide);
+    } catch (err) {}
+  });
+
+  socket.on('send_in_app_chat', async (msg) => {
+    io.emit('receive_in_app_chat', msg);
+  });
+
+  socket.on('disconnect', () => {
+    for (let [userId, val] of liveRidersMap.entries()) {
+      if (val.socketId === socket.id) liveRidersMap.delete(userId);
+    }
+    io.emit('nearby_riders_update', Array.from(liveRidersMap.values()));
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`SPCT Avengers Backend running on port ${PORT}`);
+});
