@@ -29,12 +29,7 @@ try {
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mongodb.net/spct_avengers?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
-  .then(async () => {
-    console.log("Connected to MongoDB successfully.");
-    try {
-      await mongoose.connection.collection('users').dropIndex('gmail_1').catch(() => {});
-    } catch (e) {}
-  })
+  .then(() => console.log("Connected to MongoDB successfully."))
   .catch((err) => console.log("MongoDB connection fallback to memory:", err.message));
 
 const rideSchema = new mongoose.Schema({
@@ -217,10 +212,6 @@ app.delete('/api/admin/users/:id', async (req, res) => {
 app.post('/api/auth/google-login', async (req, res) => {
   const { fullName, email, avatar, phone, role, mode } = req.body;
   try {
-    if (!email) {
-      return res.status(400).json({ success: false, error: 'Email is required for authentication.' });
-    }
-
     let user = null;
     if (mongoose.connection.readyState === 1) {
       user = await User.findOne({ email });
@@ -231,7 +222,7 @@ app.post('/api/auth/google-login', async (req, res) => {
             return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
           }
         }
-        user = await User.create({ fullName: fullName || 'User', email, avatar: avatar || '', phone: phone || '', role: role || 'ride_taker', notificationAllowed: true, gpsAllowed: true });
+        user = await User.create({ fullName, email, avatar, phone: phone || '', role, notificationAllowed: true, gpsAllowed: true });
       } else if (user) {
         if (phone && phone !== user.phone) {
           const phoneExists = await User.findOne({ phone });
@@ -244,14 +235,6 @@ app.post('/api/auth/google-login', async (req, res) => {
         if (fullName) user.fullName = fullName;
         if (avatar) user.avatar = avatar;
         await user.save();
-      } else {
-        if (phone) {
-          const phoneExists = await User.findOne({ phone });
-          if (phoneExists) {
-            return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
-          }
-        }
-        user = await User.create({ fullName: fullName || 'User', email, avatar: avatar || '', phone: phone || '', role: role || 'ride_taker', notificationAllowed: true, gpsAllowed: true });
       }
     } else {
       user = memoryUsers.find(u => u.email === email);
@@ -259,7 +242,7 @@ app.post('/api/auth/google-login', async (req, res) => {
         if (phone && memoryUsers.some(u => u.phone === phone)) {
           return res.status(400).json({ success: false, error: 'This mobile number is already registered with another account.' });
         }
-        user = { _id: 'usr_' + Date.now(), fullName: fullName || 'User', email, avatar: avatar || '', phone: phone || '', role: role || 'ride_taker', notificationAllowed: true, gpsAllowed: true };
+        user = { _id: 'usr_' + Date.now(), fullName, email, avatar, phone: phone || '', role, notificationAllowed: true, gpsAllowed: true };
         memoryUsers.push(user);
       } else if (user) {
         if (phone) user.phone = phone;
@@ -329,7 +312,7 @@ io.on('connection', (socket) => {
     try {
       let updatedRide = null;
       if (mongoose.connection.readyState === 1) {
-        updatedRide = await Ride.findByIdAndUpdate(rideId, { status: 'accepted', acceptedBy: accepter }, { new: true }).lean();
+        updatedRide = await Ride.findByIdAndUpdate(rideId, { status: 'accepted', acceptedBy: accepter }, { new: type = 'true' }).lean();
       } else {
         const ride = memoryRides.find(r => r._id === rideId);
         if (ride) {
