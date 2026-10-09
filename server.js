@@ -60,13 +60,24 @@ const subscriptionSchema = new mongoose.Schema({
   keys: { p256dh: String, auth: String }
 });
 
+const noticeSchema = new mongoose.Schema({
+  notices: [String],
+  updatedAt: { type: Date, default: Date.now }
+});
+
 const Ride = mongoose.model('Ride', rideSchema);
 const User = mongoose.model('User', userSchema);
 const PushSubscription = mongoose.model('PushSubscription', subscriptionSchema);
+const Notice = mongoose.model('Notice', noticeSchema);
 
 const memoryRides = [];
 const memoryUsers = [];
 const memorySubscriptions = [];
+let memoryNotices = [
+  "System Notice: Kindly allow all notifications & location permissions for seamless ride coordination.",
+  "Operational Update: Keep GPS active so nearby pilots can accurately track active commutes.",
+  "Security Advisory: Verify partner credentials and mobile numbers prior to trip commencement."
+];
 
 app.post('/api/save-subscription', async (req, res) => {
   const subscription = req.body;
@@ -103,6 +114,44 @@ app.get('/api/rides', async (req, res) => {
     } else {
       res.json(memoryRides.slice().reverse());
     }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/notices', async (req, res) => {
+  try {
+    if (mongoose.connection.readyState === 1) {
+      let doc = await Notice.findOne();
+      if (!doc) {
+        doc = await Notice.create({ notices: memoryNotices });
+      }
+      res.json(doc.notices);
+    } else {
+      res.json(memoryNotices);
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/notices', async (req, res) => {
+  const { notices } = req.body;
+  if (!Array.isArray(notices)) return res.status(400).json({ error: 'Invalid format' });
+  try {
+    if (mongoose.connection.readyState === 1) {
+      let doc = await Notice.findOne();
+      if (doc) {
+        doc.notices = notices;
+        await doc.save();
+      } else {
+        await Notice.create({ notices });
+      }
+    } else {
+      memoryNotices = notices;
+    }
+    io.emit('notices_updated_broadcast', notices);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -312,9 +361,9 @@ io.on('connection', (socket) => {
     try {
       let updatedRide = null;
       if (mongoose.connection.readyState === 1) {
-        updatedRide = await Ride.findByIdAndUpdate(rideId, { status: 'accepted', acceptedBy: accepter }, { new: type = 'true' }).lean();
+        updatedRide = await Ride.findByIdAndUpdate(rideId, { status: 'accepted', acceptedBy: accepter }, { new: true }).lean();
       } else {
-        const ride = memoryRides.find(r => r._id === rideId);
+        const ride = memoryRides.memoryRides.find(r => r._id === rideId);
         if (ride) {
           ride.status = 'accepted';
           ride.acceptedBy = accepter;
