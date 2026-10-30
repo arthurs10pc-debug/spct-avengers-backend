@@ -41,7 +41,12 @@ const userSchema = new mongoose.Schema({
   role: { type: String, default: 'commander' },
   notificationAllowed: { type: Boolean, default: true },
   gpsAllowed: { type: Boolean, default: true },
-  createdAt: { type: Date, default: Date.now }
+  reminders: { type: Array, default: [] },
+  snoozeMinutes: { type: Number, default: 1 },
+  expenses: { type: Array, default: [] },
+  monthlyBudget: { type: Number, default: 5000 },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
 });
 
 const User = mongoose.model('User', userSchema);
@@ -142,7 +147,122 @@ app.post('/api/auth/check-user', async (req, res) => {
   }
 });
 
+// Cloud Sync Endpoints for Reminders & Expenses
+app.get('/api/user/sync-data', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+  const cleanEmail = email.trim().toLowerCase();
+  try {
+    if (mongoose.connection.readyState === 1) {
+      const user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      return res.json({
+        success: true,
+        reminders: user.reminders || [],
+        snoozeMinutes: user.snoozeMinutes ?? 1,
+        expenses: user.expenses || [],
+        monthlyBudget: user.monthlyBudget ?? 5000
+      });
+    } else {
+      const memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+      if (!memUser) return res.status(404).json({ error: 'User not found' });
+      return res.json({
+        success: true,
+        reminders: memUser.reminders || [],
+        snoozeMinutes: memUser.snoozeMinutes ?? 1,
+        expenses: memUser.expenses || [],
+        monthlyBudget: memUser.monthlyBudget ?? 5000
+      });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/user/sync-data', async (req, res) => {
+  const { email, reminders, snoozeMinutes, expenses, monthlyBudget } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+  const cleanEmail = email.trim().toLowerCase();
+
+  try {
+    const updatedData = {
+      reminders: Array.isArray(reminders) ? reminders : [],
+      snoozeMinutes: typeof snoozeMinutes === 'number' ? snoozeMinutes : 1,
+      expenses: Array.isArray(expenses) ? expenses : [],
+      monthlyBudget: typeof monthlyBudget === 'number' ? monthlyBudget : 5000,
+      updatedAt: new Date()
+    };
+
+    if (mongoose.connection.readyState === 1) {
+      await User.findOneAndUpdate(
+        { email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } },
+        { $set: updatedData },
+        { upsert: true, new: true }
+      );
+    } else {
+      let memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+      if (memUser) {
+        Object.assign(memUser, updatedData);
+      } else {
+        memoryUsers.push({ email: cleanEmail, ...updatedData });
+      }
+    }
+
+    // Broadcast in real-time to all connected devices for this user
+    io.to(`user:${cleanEmail}`).emit('user_data_synced', {
+      email: cleanEmail,
+      ...updatedData
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 io.on('connection', (socket) => {
+  // Join a room for the logged-in user's email
+  socket.on('join_user_room', (email) => {
+    if (email) {
+      const cleanEmail = email.trim().toLowerCase();
+      socket.join(`user:${cleanEmail}`);
+    }
+  });
+
+  socket.on('sync_user_data_realtime', async (payload) => {
+    if (!payload || !payload.email) return;
+    const cleanEmail = payload.email.trim().toLowerCase();
+    const updatedData = {
+      reminders: Array.isArray(payload.reminders) ? payload.reminders : [],
+      snoozeMinutes: typeof payload.snoozeMinutes === 'number' ? payload.snoozeMinutes : 1,
+      expenses: Array.isArray(payload.expenses) ? payload.expenses : [],
+      monthlyBudget: typeof payload.monthlyBudget === 'number' ? payload.monthlyBudget : 5000,
+      updatedAt: new Date()
+    };
+
+    try {
+      if (mongoose.connection.readyState === 1) {
+        await User.findOneAndUpdate(
+          { email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } },
+          { $set: updatedData },
+          { upsert: true }
+        );
+      } else {
+        let memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+        if (memUser) Object.assign(memUser, updatedData);
+        else memoryUsers.push({ email: cleanEmail, ...updatedData });
+      }
+    } catch (e) {
+      console.error("DB update error in socket:", e.message);
+    }
+
+    // Broadcast in real-time to other connected devices of this user
+    socket.to(`user:${cleanEmail}`).emit('user_data_synced', {
+      email: cleanEmail,
+      ...updatedData
+    });
+  });
+
   socket.on('command_executed', async (data) => {
     try {
       await CommandLog.create(data);
