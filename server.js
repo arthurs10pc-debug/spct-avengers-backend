@@ -18,7 +18,7 @@ const io = new Server(server, {
   transports: ['websocket', 'polling']
 });
 
-const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://het:het123@cluster0.mongodb.net/lonewolf_ai?retryWrites=true&w=majority";
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://Arthur:Darsh50060Secure@cluster0.o6vkjit.mongodb.net/spct_avengers?retryWrites=true&w=majority&appName=Cluster0";
 
 mongoose.connect(MONGO_URI)
   .then(() => console.log("Connected to Lone Wolf MongoDB."))
@@ -33,8 +33,100 @@ const logSchema = new mongoose.Schema({
 
 const CommandLog = mongoose.model('CommandLog', logSchema);
 
+const userSchema = new mongoose.Schema({
+  fullName: { type: String, default: '' },
+  email: { type: String, required: true, unique: true },
+  phone: { type: String, default: '' },
+  avatar: { type: String, default: '' },
+  role: { type: String, default: 'commander' },
+  notificationAllowed: { type: Boolean, default: true },
+  gpsAllowed: { type: Boolean, default: true },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const User = mongoose.model('User', userSchema);
+
 app.get('/', (req, res) => {
   res.send("Lone Wolf AI Assistant Backend Online.");
+});
+
+// Google Auth & User Verification API
+app.post('/api/auth/google-login', async (req, res) => {
+  const { email, fullName, avatar, phone, role, mode } = req.body;
+  if (!email) {
+    return res.status(400).json({ success: false, error: 'Email is required' });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+
+  try {
+    if (mongoose.connection.readyState === 1) {
+      let user = await User.findOne({ email: cleanEmail });
+
+      if (mode === 'login') {
+        if (!user) {
+          return res.status(404).json({
+            success: false,
+            error: `Yeh Gmail ID (${cleanEmail}) database mein registered nahi hai! Pehle Sign Up karein.`
+          });
+        }
+        return res.json({
+          success: true,
+          user,
+          message: `Logged in successfully as ${user.fullName || user.email}.`
+        });
+      }
+
+      // mode === 'signup'
+      if (!user) {
+        user = await User.create({
+          fullName: fullName || cleanEmail.split('@')[0],
+          email: cleanEmail,
+          avatar: avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(fullName || cleanEmail)}&background=E8D2B5&color=590907`,
+          phone: phone || '',
+          role: role || 'commander',
+          notificationAllowed: true,
+          gpsAllowed: true
+        });
+        return res.json({
+          success: true,
+          user,
+          isNew: true,
+          message: `Sign Up Success! Welcome ${user.fullName || user.email}.`
+        });
+      } else {
+        if (fullName) user.fullName = fullName;
+        if (avatar) user.avatar = avatar;
+        await user.save();
+        return res.json({
+          success: true,
+          user,
+          isNew: false,
+          message: `Welcome back, ${user.fullName || user.email}!`
+        });
+      }
+    } else {
+      return res.status(503).json({ success: false, error: 'Database is connecting, please try again.' });
+    }
+  } catch (err) {
+    console.error("Auth Error:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/auth/check-user', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, error: 'Email is required' });
+  try {
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: cleanEmail });
+    if (!user) {
+      return res.json({ exists: false });
+    }
+    return res.json({ exists: true, user });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 io.on('connection', (socket) => {
