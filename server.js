@@ -221,12 +221,43 @@ app.post('/api/user/sync-data', async (req, res) => {
   }
 });
 
-// Live Trending Google News RSS Feed Proxy
+// Live Trending Google News RSS Feed Proxy with 3 Categories: Global, India, Gujarat
 app.get('/api/news/trending', async (req, res) => {
+  const category = (req.query.category || req.query.region || 'india').toLowerCase();
+
+  let feedUrl = 'https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en';
+  if (category === 'global' || category === 'globe' || category === 'world') {
+    feedUrl = 'https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en';
+  } else if (category === 'gujarat') {
+    feedUrl = 'https://news.google.com/rss/search?q=Gujarat+when:48h&hl=en-IN&gl=IN&ceid=IN:en';
+  }
+
+  // Curated category thumbnails & video preview clips
+  const categoryImages = {
+    global: [
+      'https://images.unsplash.com/photo-1526304640581-d334cdbbf45e?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1502920917128-1aa500764cbd?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1504711434969-e33886168f5c?auto=format&fit=crop&w=600&q=80'
+    ],
+    india: [
+      'https://images.unsplash.com/photo-1532375810709-75b1da00537c?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1596176530529-78163a4f7af2?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1524492412937-b28074a5d7da?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1541872703-74c5e44368f9?auto=format&fit=crop&w=600&q=80'
+    ],
+    gujarat: [
+      'https://images.unsplash.com/photo-1609137144822-2615462c0b05?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1582510003544-4d00b7f74220?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1570168007204-dfb528c6958f?auto=format&fit=crop&w=600&q=80',
+      'https://images.unsplash.com/photo-1518684079-3c830dcef090?auto=format&fit=crop&w=600&q=80'
+    ]
+  };
+
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 7000);
-    const response = await fetch('https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en', {
+    const timeout = setTimeout(() => controller.abort(), 7500);
+    const response = await fetch(feedUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       signal: controller.signal
     });
@@ -235,48 +266,62 @@ app.get('/api/news/trending', async (req, res) => {
 
     const items = [];
     const itemMatches = xml.match(/<item>([\s\S]*?)<\/item>/g) || [];
-    for (const itemXml of itemMatches.slice(0, 15)) {
+    let idx = 0;
+    for (const itemXml of itemMatches.slice(0, 16)) {
       const titleMatch = itemXml.match(/<title>([\s\S]*?)<\/title>/);
       const linkMatch = itemXml.match(/<link>([\s\S]*?)<\/link>/);
       const pubDateMatch = itemXml.match(/<pubDate>([\s\S]*?)<\/pubDate>/);
       const sourceMatch = itemXml.match(/<source[^>]*>([\s\S]*?)<\/source>/);
+      const mediaMatch = itemXml.match(/url="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i) || itemXml.match(/<img[^>]+src="([^">]+)"/i);
 
       let title = titleMatch ? titleMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim() : '';
       let link = linkMatch ? linkMatch[1].trim() : '#';
       let pubDate = pubDateMatch ? pubDateMatch[1].trim() : '';
       let source = sourceMatch ? sourceMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim() : 'Google News';
 
-      // Clean title if source is repeated at the end like "- NDTV"
       if (title.includes(' - ')) {
         const parts = title.split(' - ');
         source = parts.pop();
         title = parts.join(' - ');
       }
 
+      const imgList = categoryImages[category] || categoryImages.india;
+      const imageUrl = mediaMatch ? mediaMatch[1] : imgList[idx % imgList.length];
+
       if (title) {
-        items.push({ title, link, pubDate, source });
+        items.push({
+          id: `news_${Date.now()}_${idx}`,
+          title,
+          link,
+          pubDate,
+          source,
+          category,
+          imageUrl,
+          videoUrl: '/jarvis-particles.mp4' // Hover-playable animated clip
+        });
+        idx++;
       }
     }
 
     return res.json({
       success: true,
+      category,
       lastUpdated: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       count: items.length,
       news: items
     });
   } catch (err) {
-    // Fallback breaking headlines if network fails
-    const fallbackNews = [
-      { title: "Sensex & Nifty touch record highs amidst global financial momentum", source: "Financial Express", pubDate: new Date().toUTCString(), link: "https://news.google.com" },
-      { title: "Gujarat Tech & Innovation Corridor: Major updates announced", source: "Gujarat Samachar", pubDate: new Date().toUTCString(), link: "https://news.google.com" },
-      { title: "ISRO prepares upcoming satellite navigation mission launch", source: "NDTV", pubDate: new Date().toUTCString(), link: "https://news.google.com" },
-      { title: "Weather update: Clear skies forecasted across western India", source: "Times of India", pubDate: new Date().toUTCString(), link: "https://news.google.com" }
+    const fallbackList = [
+      { id: 'fb_1', title: "Global financial corridors and technological initiatives expand", source: "Reuters", pubDate: new Date().toUTCString(), link: "https://news.google.com", category, imageUrl: categoryImages.global[0], videoUrl: '/jarvis-particles.mp4' },
+      { id: 'fb_2', title: "Gujarat Tech & Innovation Corridor: Major milestones announced across Ahmedabad & Gandhinagar", source: "Gujarat Samachar", pubDate: new Date().toUTCString(), link: "https://news.google.com", category, imageUrl: categoryImages.gujarat[0], videoUrl: '/jarvis-particles.mp4' },
+      { id: 'fb_3', title: "India launches next-generation aerospace infrastructure and digital systems", source: "NDTV", pubDate: new Date().toUTCString(), link: "https://news.google.com", category, imageUrl: categoryImages.india[0], videoUrl: '/jarvis-particles.mp4' }
     ];
     return res.json({
       success: true,
+      category,
       lastUpdated: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      count: fallbackNews.length,
-      news: fallbackNews
+      count: fallbackList.length,
+      news: fallbackList
     });
   }
 });
