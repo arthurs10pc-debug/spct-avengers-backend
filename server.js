@@ -22,7 +22,7 @@ const io = new Server(server, {
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://Arthur:Darsh50060Secure@cluster0.o6vkjit.mongodb.net/spct_avengers?retryWrites=true&w=majority&appName=Cluster0";
 
 mongoose.connect(MONGO_URI)
-  .then(() => console.log("Connected to Lone Wolf MongoDB."))
+  .then(() => console.log("Connected to Shadow MongoDB."))
   .catch((err) => console.log("MongoDB connection fallback:", err.message));
 
 const logSchema = new mongoose.Schema({
@@ -56,7 +56,7 @@ const User = mongoose.model('User', userSchema);
 const memoryUsers = [];
 
 app.get('/', (req, res) => {
-  res.send("Lone Wolf AI Assistant Backend Online.");
+  res.send("Shadow Backend Online.");
 });
 
 // Google Auth & User Verification API
@@ -331,7 +331,7 @@ const buildNotesReminderEmailHtml = (userEmail, notes, timeSlotLabel) => {
   <body>
     <div class="container">
       <div class="header">
-        <h1>SPCT LONE WOLF JARVIS</h1>
+        <h1>SHADOW DASHBOARD</h1>
         <p>Your Personal Notes & Daily Tasks Reminder • ${nowFormatted}</p>
         <span class="badge">${timeSlotLabel} EDITION</span>
       </div>
@@ -383,7 +383,7 @@ const buildNotesReminderEmailHtml = (userEmail, notes, timeSlotLabel) => {
         ` : ''}
 
         ${notes.length === 0 ? `
-          <p style="text-align:center; color:#94a3b8; padding:30px 0;">No active notes found. Add your tasks and notes in SPCT Lone Wolf to receive reminders.</p>
+          <p style="text-align:center; color:#94a3b8; padding:30px 0;">No active notes found. Add your tasks and notes in Shadow Dashboard to receive reminders.</p>
         ` : ''}
       </div>
       <div class="footer">
@@ -397,27 +397,29 @@ const buildNotesReminderEmailHtml = (userEmail, notes, timeSlotLabel) => {
 
 // Route to manually or programmatically trigger reminder email for signed user
 app.post('/api/notes/send-reminder-email', async (req, res) => {
-  const { email, slotLabel } = req.body;
+  const { email, slotLabel, notes } = req.body;
   if (!email) return res.status(400).json({ success: false, error: 'Email is required' });
   const cleanEmail = email.trim().toLowerCase();
 
   try {
-    let userNotes = [];
-    if (mongoose.connection.readyState === 1) {
-      const user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
-      userNotes = user?.notes || [];
-    } else {
-      const memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
-      userNotes = memUser?.notes || [];
+    let userNotes = Array.isArray(notes) && notes.length > 0 ? notes : [];
+    if (userNotes.length === 0) {
+      if (mongoose.connection.readyState === 1) {
+        const user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+        userNotes = user?.notes || [];
+      } else {
+        const memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+        userNotes = memUser?.notes || [];
+      }
     }
 
-    const slot = slotLabel || 'Daily Tasks';
+    const slot = slotLabel || 'Instant Notes & Tasks';
     const htmlBody = buildNotesReminderEmailHtml(cleanEmail, userNotes, slot);
 
     await mailTransporter.sendMail({
-      from: `"SPCT Lone Wolf Jarvis" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
+      from: `"Shadow Dashboard" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
       to: cleanEmail,
-      subject: `Lone Wolf Notes Reminder: ${userNotes.length} Notes & Tasks [${slot}]`,
+      subject: `Shadow Notes Reminder: ${userNotes.length} Notes & Tasks [${slot}]`,
       html: htmlBody
     });
 
@@ -463,9 +465,9 @@ setInterval(async () => {
       try {
         const html = buildNotesReminderEmailHtml(u.email, u.notes, slot);
         await mailTransporter.sendMail({
-          from: `"SPCT Lone Wolf Jarvis" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
+          from: `"Shadow Dashboard" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
           to: u.email,
-          subject: `Lone Wolf Notes Reminder: ${u.notes.length} Notes & Tasks [${slot}]`,
+          subject: `Shadow Notes Reminder: ${u.notes.length} Notes & Tasks [${slot}]`,
           html
         });
         console.log(`[3x Daily Scheduler] Dispatched email to ${u.email}`);
@@ -640,5 +642,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => {
-  console.log(`Lone Wolf AI Backend running on port ${PORT}`);
+  console.log(`Shadow Backend running on port ${PORT}`);
 });
