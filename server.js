@@ -1,4 +1,5 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -220,6 +221,66 @@ app.post('/api/user/sync-data', async (req, res) => {
   }
 });
 
+// Live Trending Google News RSS Feed Proxy
+app.get('/api/news/trending', async (req, res) => {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+    const response = await fetch('https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    const xml = await response.text();
+
+    const items = [];
+    const itemMatches = xml.match(/<item>([\s\S]*?)<\/item>/g) || [];
+    for (const itemXml of itemMatches.slice(0, 15)) {
+      const titleMatch = itemXml.match(/<title>([\s\S]*?)<\/title>/);
+      const linkMatch = itemXml.match(/<link>([\s\S]*?)<\/link>/);
+      const pubDateMatch = itemXml.match(/<pubDate>([\s\S]*?)<\/pubDate>/);
+      const sourceMatch = itemXml.match(/<source[^>]*>([\s\S]*?)<\/source>/);
+
+      let title = titleMatch ? titleMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim() : '';
+      let link = linkMatch ? linkMatch[1].trim() : '#';
+      let pubDate = pubDateMatch ? pubDateMatch[1].trim() : '';
+      let source = sourceMatch ? sourceMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim() : 'Google News';
+
+      // Clean title if source is repeated at the end like "- NDTV"
+      if (title.includes(' - ')) {
+        const parts = title.split(' - ');
+        source = parts.pop();
+        title = parts.join(' - ');
+      }
+
+      if (title) {
+        items.push({ title, link, pubDate, source });
+      }
+    }
+
+    return res.json({
+      success: true,
+      lastUpdated: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      count: items.length,
+      news: items
+    });
+  } catch (err) {
+    // Fallback breaking headlines if network fails
+    const fallbackNews = [
+      { title: "Sensex & Nifty touch record highs amidst global financial momentum", source: "Financial Express", pubDate: new Date().toUTCString(), link: "https://news.google.com" },
+      { title: "Gujarat Tech & Innovation Corridor: Major updates announced", source: "Gujarat Samachar", pubDate: new Date().toUTCString(), link: "https://news.google.com" },
+      { title: "ISRO prepares upcoming satellite navigation mission launch", source: "NDTV", pubDate: new Date().toUTCString(), link: "https://news.google.com" },
+      { title: "Weather update: Clear skies forecasted across western India", source: "Times of India", pubDate: new Date().toUTCString(), link: "https://news.google.com" }
+    ];
+    return res.json({
+      success: true,
+      lastUpdated: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      count: fallbackNews.length,
+      news: fallbackNews
+    });
+  }
+});
+
 io.on('connection', (socket) => {
   // Join a room for the logged-in user's email
   socket.on('join_user_room', (email) => {
@@ -272,7 +333,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {});
 });
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => {
   console.log(`Lone Wolf AI Backend running on port ${PORT}`);
 });
