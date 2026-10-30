@@ -46,6 +46,8 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
+const memoryUsers = [];
+
 app.get('/', (req, res) => {
   res.send("Lone Wolf AI Assistant Backend Online.");
 });
@@ -61,7 +63,7 @@ app.post('/api/auth/google-login', async (req, res) => {
 
   try {
     if (mongoose.connection.readyState === 1) {
-      let user = await User.findOne({ email: cleanEmail });
+      let user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
 
       if (mode === 'login') {
         if (!user) {
@@ -106,7 +108,18 @@ app.post('/api/auth/google-login', async (req, res) => {
         });
       }
     } else {
-      return res.status(503).json({ success: false, error: 'Database is connecting, please try again.' });
+      let memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+      if (mode === 'login') {
+        if (!memUser) {
+          return res.status(404).json({ success: false, error: `Yeh Gmail ID (${cleanEmail}) database mein registered nahi hai! Pehle Sign Up karein.` });
+        }
+        return res.json({ success: true, user: memUser });
+      }
+      if (!memUser) {
+        memUser = { _id: 'usr_' + Date.now(), fullName: fullName || cleanEmail.split('@')[0], email: cleanEmail, avatar: avatar || '', phone: phone || '', role: role || 'commander', notificationAllowed: true, gpsAllowed: true };
+        memoryUsers.push(memUser);
+      }
+      return res.json({ success: true, user: memUser, isNew: true });
     }
   } catch (err) {
     console.error("Auth Error:", err);
