@@ -34,6 +34,12 @@ const logSchema = new mongoose.Schema({
 
 const CommandLog = mongoose.model('CommandLog', logSchema);
 
+const DEFAULT_REMINDERS = [
+  { task: "Morning Review & Focus", time: "09:00", completed: false },
+  { task: "Afternoon Work & Tasks", time: "14:00", completed: false },
+  { task: "Evening Wrap Up & Notes", time: "20:00", completed: false }
+];
+
 const userSchema = new mongoose.Schema({
   fullName: { type: String, default: '' },
   email: { type: String, required: true, unique: true },
@@ -42,7 +48,7 @@ const userSchema = new mongoose.Schema({
   role: { type: String, default: 'commander' },
   notificationAllowed: { type: Boolean, default: true },
   gpsAllowed: { type: Boolean, default: true },
-  reminders: { type: Array, default: [] },
+  reminders: { type: Array, default: DEFAULT_REMINDERS },
   snoozeMinutes: { type: Number, default: 1 },
   expenses: { type: Array, default: [] },
   notes: { type: Array, default: [] },
@@ -158,9 +164,10 @@ app.get('/api/user/sync-data', async (req, res) => {
     if (mongoose.connection.readyState === 1) {
       const user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
       if (!user) return res.status(404).json({ error: 'User not found' });
+      const userReminders = (Array.isArray(user.reminders) && user.reminders.length > 0) ? user.reminders : DEFAULT_REMINDERS;
       return res.json({
         success: true,
-        reminders: user.reminders || [],
+        reminders: userReminders,
         snoozeMinutes: user.snoozeMinutes ?? 1,
         expenses: user.expenses || [],
         monthlyBudget: user.monthlyBudget ?? 5000
@@ -168,9 +175,10 @@ app.get('/api/user/sync-data', async (req, res) => {
     } else {
       const memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
       if (!memUser) return res.status(404).json({ error: 'User not found' });
+      const memReminders = (Array.isArray(memUser.reminders) && memUser.reminders.length > 0) ? memUser.reminders : DEFAULT_REMINDERS;
       return res.json({
         success: true,
-        reminders: memUser.reminders || [],
+        reminders: memReminders,
         snoozeMinutes: memUser.snoozeMinutes ?? 1,
         expenses: memUser.expenses || [],
         monthlyBudget: memUser.monthlyBudget ?? 5000
@@ -188,7 +196,7 @@ app.post('/api/user/sync-data', async (req, res) => {
 
   try {
     const updatedData = {
-      reminders: Array.isArray(reminders) ? reminders : [],
+      reminders: (Array.isArray(reminders) && reminders.length > 0) ? reminders : DEFAULT_REMINDERS,
       snoozeMinutes: typeof snoozeMinutes === 'number' ? snoozeMinutes : 1,
       expenses: Array.isArray(expenses) ? expenses : [],
       monthlyBudget: typeof monthlyBudget === 'number' ? monthlyBudget : 5000,
@@ -970,7 +978,7 @@ io.on('connection', (socket) => {
     if (!payload || !payload.email) return;
     const cleanEmail = payload.email.trim().toLowerCase();
     const updatedData = {
-      reminders: Array.isArray(payload.reminders) ? payload.reminders : [],
+      reminders: (Array.isArray(payload.reminders) && payload.reminders.length > 0) ? payload.reminders : DEFAULT_REMINDERS,
       snoozeMinutes: typeof payload.snoozeMinutes === 'number' ? payload.snoozeMinutes : 1,
       expenses: Array.isArray(payload.expenses) ? payload.expenses : [],
       monthlyBudget: typeof payload.monthlyBudget === 'number' ? payload.monthlyBudget : 5000,
