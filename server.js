@@ -381,6 +381,11 @@ const buildNotesReminderEmailHtml = (userEmail, notes, timeSlotLabel) => {
             <div class="note-card" style="border-left-color: ${n.color || '#38bdf8'};">
               <div class="note-title">${n.title || 'Untitled Note'}</div>
               <p class="note-body">${n.content || ''}</p>
+              ${Array.isArray(n.attachments) && n.attachments.length > 0 ? `
+                <div style="margin-top: 8px; font-size: 11px; color: #38bdf8; font-weight: bold; background: #0f172a; padding: 6px 10px; border-radius: 6px; border: 1px solid #334155;">
+                  📎 Attachments (${n.attachments.length}): ${n.attachments.map(a => `${a.type === 'photo' ? '📷' : a.type === 'video' ? '🎥' : a.type === 'audio' ? '🎵' : '📄'} ${a.name}`).join(', ')}
+                </div>
+              ` : ''}
             </div>
           `).join('')}
         ` : ''}
