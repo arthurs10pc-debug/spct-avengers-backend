@@ -416,12 +416,16 @@ app.post('/api/notes/send-reminder-email', async (req, res) => {
     const slot = slotLabel || 'Instant Notes & Tasks';
     const htmlBody = buildNotesReminderEmailHtml(cleanEmail, userNotes, slot);
 
-    await mailTransporter.sendMail({
+    const sendPromise = mailTransporter.sendMail({
       from: `"Shadow Dashboard" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
       to: cleanEmail,
       subject: `Shadow Notes Reminder: ${userNotes.length} Notes & Tasks [${slot}]`,
       html: htmlBody
     });
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('SMTP connection timed out')), 9000)
+    );
+    await Promise.race([sendPromise, timeoutPromise]);
 
     console.log(`[Email Reminder] Successfully sent notes email to ${cleanEmail}`);
     return res.json({ success: true, message: `Notes reminder email successfully delivered to ${cleanEmail}` });
