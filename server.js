@@ -164,15 +164,30 @@ app.post('/api/auth/check-user', async (req, res) => {
   }
 });
 
-// Cloud Sync Endpoints for Reminders & Expenses
+// Cloud Sync Endpoints for Reminders, Notes & Expenses
 app.get('/api/user/sync-data', async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).json({ error: 'Email is required' });
   const cleanEmail = email.trim().toLowerCase();
   try {
     if (mongoose.connection.readyState === 1) {
-      const user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
-      if (!user) return res.status(404).json({ error: 'User not found' });
+      let user = await User.findOne({ email: cleanEmail });
+      if (!user) {
+        user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+      }
+      if (!user) {
+        // Auto-provision initial cloud store for this Gmail account so mobile/desktop sync immediately
+        user = await User.create({
+          email: cleanEmail,
+          fullName: cleanEmail.split('@')[0],
+          reminders: DEFAULT_REMINDERS,
+          snoozeMinutes: 1,
+          expenses: [],
+          notes: [],
+          monthlyBudget: 5000,
+          updatedAt: new Date()
+        });
+      }
       const userReminders = (Array.isArray(user.reminders) && user.reminders.length > 0) ? user.reminders : DEFAULT_REMINDERS;
       return res.json({
         success: true,
@@ -184,8 +199,19 @@ app.get('/api/user/sync-data', async (req, res) => {
         updatedAt: user.updatedAt || new Date()
       });
     } else {
-      const memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
-      if (!memUser) return res.status(404).json({ error: 'User not found' });
+      let memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+      if (!memUser) {
+        memUser = {
+          email: cleanEmail,
+          reminders: DEFAULT_REMINDERS,
+          snoozeMinutes: 1,
+          expenses: [],
+          notes: [],
+          monthlyBudget: 5000,
+          updatedAt: new Date()
+        };
+        memoryUsers.push(memUser);
+      }
       const memReminders = (Array.isArray(memUser.reminders) && memUser.reminders.length > 0) ? memUser.reminders : DEFAULT_REMINDERS;
       return res.json({
         success: true,
@@ -209,6 +235,7 @@ app.post('/api/user/sync-data', async (req, res) => {
 
   try {
     const updatedData = {
+      email: cleanEmail,
       reminders: (Array.isArray(reminders) && reminders.length > 0) ? reminders : DEFAULT_REMINDERS,
       snoozeMinutes: typeof snoozeMinutes === 'number' ? snoozeMinutes : 1,
       expenses: Array.isArray(expenses) ? expenses : [],
@@ -221,16 +248,16 @@ app.post('/api/user/sync-data', async (req, res) => {
 
     if (mongoose.connection.readyState === 1) {
       await User.findOneAndUpdate(
-        { email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } },
+        { email: cleanEmail },
         { $set: updatedData },
-        { upsert: true, new: true }
+        { upsert: true, new: true, setDefaultsOnInsert: true }
       );
     } else {
       let memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
       if (memUser) {
         Object.assign(memUser, updatedData);
       } else {
-        memoryUsers.push({ email: cleanEmail, ...updatedData });
+        memoryUsers.push({ ...updatedData });
       }
     }
 
