@@ -59,6 +59,15 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
+const emailLogSchema = new mongoose.Schema({
+  dateKey: { type: String, required: true },
+  slot: { type: String, required: true },
+  recipientsCount: { type: Number, default: 0 },
+  sentAt: { type: Date, default: Date.now }
+});
+emailLogSchema.index({ dateKey: 1, slot: 1 }, { unique: true });
+const EmailDispatchLog = mongoose.models.EmailDispatchLog || mongoose.model('EmailDispatchLog', emailLogSchema);
+
 const memoryUsers = [];
 
 app.get('/', (req, res) => {
@@ -170,7 +179,9 @@ app.get('/api/user/sync-data', async (req, res) => {
         reminders: userReminders,
         snoozeMinutes: user.snoozeMinutes ?? 1,
         expenses: user.expenses || [],
-        monthlyBudget: user.monthlyBudget ?? 5000
+        monthlyBudget: user.monthlyBudget ?? 5000,
+        notes: user.notes || [],
+        updatedAt: user.updatedAt || new Date()
       });
     } else {
       const memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
@@ -181,7 +192,9 @@ app.get('/api/user/sync-data', async (req, res) => {
         reminders: memReminders,
         snoozeMinutes: memUser.snoozeMinutes ?? 1,
         expenses: memUser.expenses || [],
-        monthlyBudget: memUser.monthlyBudget ?? 5000
+        monthlyBudget: memUser.monthlyBudget ?? 5000,
+        notes: memUser.notes || [],
+        updatedAt: memUser.updatedAt || new Date()
       });
     }
   } catch (err) {
@@ -227,7 +240,7 @@ app.post('/api/user/sync-data', async (req, res) => {
       ...updatedData
     });
 
-    return res.json({ success: true });
+    return res.json({ success: true, updatedAt: updatedData.updatedAt });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -433,21 +446,17 @@ app.post('/api/notes/send-reminder-email', async (req, res) => {
     const htmlBody = buildNotesReminderEmailHtml(cleanEmail, userNotes, slot);
 
     try {
-      const sendPromise = mailTransporter.sendMail({
+      const info = await mailTransporter.sendMail({
         from: `"Shadow Dashboard" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
         to: cleanEmail,
         subject: `Shadow Notes Reminder: ${userNotes.length} Notes & Tasks [${slot}]`,
         html: htmlBody
       });
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('SMTP connection timed out')), 6000)
-      );
-      await Promise.race([sendPromise, timeoutPromise]);
-      console.log(`[Email Reminder] Successfully sent notes email to ${cleanEmail}`);
-      return res.json({ success: true, message: `Notes reminder email successfully delivered to ${cleanEmail}` });
+      console.log(`[Email Reminder] Successfully sent notes email to ${cleanEmail}: ${info.messageId}`);
+      return res.json({ success: true, message: `Notes reminder email successfully delivered to ${cleanEmail}`, messageId: info.messageId });
     } catch (mailErr) {
-      console.warn(`[Email Reminder Fallback]: ${mailErr.message}. Queued for ${cleanEmail}`);
-      return res.json({ success: true, message: `Notes reminder registered and dispatched for ${cleanEmail}` });
+      console.error(`[Email Reminder Error]: ${mailErr.message}`);
+      return res.status(500).json({ success: false, error: mailErr.message });
     }
   } catch (err) {
     console.error('[Email Reminder Error]:', err.message);
@@ -465,7 +474,13 @@ async function dispatchDailyNotesScheduler(slot, targetEmailOverride = null) {
   let usersWithNotes = [];
   try {
     if (mongoose.connection.readyState === 1) {
-      usersWithNotes = await User.find({ $or: [{ 'notes.0': { $exists: true } }, { email: 'sataparahetkumar786@gmail.com' }] });
+      usersWithNotes = await User.find({
+        $or: [
+          { 'notes.0': { $exists: true } },
+          { email: 'sataparahetkumar786@gmail.com' },
+          { email: 'arthurs10pc@gmail.com' }
+        ]
+      });
     } else {
       usersWithNotes = memoryUsers.filter(u => Array.isArray(u.notes) && u.notes.length > 0);
     }
@@ -473,12 +488,14 @@ async function dispatchDailyNotesScheduler(slot, targetEmailOverride = null) {
     console.error('[3x Daily Scheduler] DB query error:', err.message);
   }
 
-  // Ensure primary user email is always included if notes exist
+  // Ensure primary user email is always included
   const primaryEmail = 'sataparahetkumar786@gmail.com';
   if (!usersWithNotes.some(u => u.email && u.email.toLowerCase() === primaryEmail.toLowerCase())) {
     const memUser = memoryUsers.find(u => u.email && u.email.toLowerCase() === primaryEmail.toLowerCase());
-    if (memUser && memUser.notes && memUser.notes.length > 0) {
+    if (memUser) {
       usersWithNotes.push(memUser);
+    } else {
+      usersWithNotes.push({ email: primaryEmail, notes: [] });
     }
   }
 
@@ -492,17 +509,17 @@ async function dispatchDailyNotesScheduler(slot, targetEmailOverride = null) {
     try {
       const userNotes = Array.isArray(u.notes) && u.notes.length > 0 
         ? u.notes 
-        : [{ title: 'Daily Focus', content: 'Organize daily priorities and review reminders.', pinned: true, date: new Date().toLocaleDateString() }];
+        : [{ title: 'Daily Focus & Priorities', content: 'Organize your daily tasks, check Watcher reminders, and review active notes.', pinned: true, date: new Date().toLocaleDateString() }];
       
       const html = buildNotesReminderEmailHtml(u.email, userNotes, slot);
-      await mailTransporter.sendMail({
+      const info = await mailTransporter.sendMail({
         from: `"Shadow Dashboard" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
         to: u.email,
         subject: `Shadow Notes Reminder: ${userNotes.length} Notes & Tasks [${slot}]`,
         html
       });
-      console.log(`[3x Daily Scheduler] Successfully dispatched email to ${u.email} for [${slot}]`);
-      results.push({ email: u.email, status: 'sent', count: userNotes.length });
+      console.log(`[3x Daily Scheduler] Successfully dispatched email to ${u.email} for [${slot}]: ${info.messageId}`);
+      results.push({ email: u.email, status: 'sent', count: userNotes.length, messageId: info.messageId });
     } catch (sendErr) {
       console.error(`[3x Daily Scheduler] Failed sending to ${u.email}:`, sendErr.message);
       results.push({ email: u.email, status: 'error', error: sendErr.message });
@@ -511,35 +528,91 @@ async function dispatchDailyNotesScheduler(slot, targetEmailOverride = null) {
   return results;
 }
 
-// Check every 30 seconds for IST schedule matching (09:00 AM, 02:00 PM, 08:00 PM IST)
-setInterval(async () => {
+// Persistent Catch-Up Check Function: Runs on interval, on startup, and when client pings
+async function checkAndDispatch3xSlots() {
   try {
-    // Standardize strictly to India Standard Time (IST: UTC+5:30)
     const istString = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
     const istDate = new Date(istString);
     const hours = istDate.getHours();
-    const minutes = istDate.getMinutes();
-    const dateKey = `${istDate.getFullYear()}-${istDate.getMonth() + 1}-${istDate.getDate()}`;
+    const dateKey = `${istDate.getFullYear()}-${String(istDate.getMonth() + 1).padStart(2, '0')}-${String(istDate.getDate()).padStart(2, '0')}`;
 
-    let slot = null;
-    // 10-minute active trigger window for each slot
-    if (hours === 9 && minutes <= 10) slot = 'Morning 09:00 AM';
-    else if (hours === 14 && minutes <= 10) slot = 'Afternoon 02:00 PM';
-    else if (hours === 20 && minutes <= 10) slot = 'Evening 08:00 PM';
+    const slotsDue = [];
+    if (hours >= 9) slotsDue.push('Morning 09:00 AM');
+    if (hours >= 14) slotsDue.push('Afternoon 02:00 PM');
+    if (hours >= 20) slotsDue.push('Evening 08:00 PM');
 
-    if (!slot) return;
+    const executed = [];
 
-    const dispatchKey = `${dateKey}_${slot}`;
-    if (sentEmailSlotsToday.has(dispatchKey)) return;
-    sentEmailSlotsToday.add(dispatchKey);
+    for (const slot of slotsDue) {
+      const dispatchKey = `${dateKey}_${slot}`;
+      let alreadySent = sentEmailSlotsToday.has(dispatchKey);
 
-    await dispatchDailyNotesScheduler(slot);
-  } catch (e) {
-    console.error("[Scheduler Error]:", e.message);
+      if (!alreadySent && mongoose.connection.readyState === 1) {
+        try {
+          const log = await EmailDispatchLog.findOne({ dateKey, slot });
+          if (log) {
+            alreadySent = true;
+            sentEmailSlotsToday.add(dispatchKey);
+          }
+        } catch (e) {}
+      }
+
+      if (!alreadySent) {
+        sentEmailSlotsToday.add(dispatchKey);
+        console.log(`[3x Catch-Up Trigger] Slot ${slot} is due for ${dateKey}. Dispatching now...`);
+        const results = await dispatchDailyNotesScheduler(slot);
+        if (mongoose.connection.readyState === 1) {
+          try {
+            await EmailDispatchLog.create({
+              dateKey,
+              slot,
+              recipientsCount: results.filter(r => r.status === 'sent').length,
+              sentAt: new Date()
+            });
+          } catch (e) {}
+        }
+        executed.push({ slot, results });
+      }
+    }
+    return { dateKey, hours, slotsDue, executed };
+  } catch (err) {
+    console.error('[Check 3x Slots Error]:', err.message);
+    return { error: err.message };
   }
-}, 30000);
+}
 
-// Endpoint to trigger or test the 3x daily scheduler on demand
+// Periodic check every 30 seconds
+setInterval(checkAndDispatch3xSlots, 30000);
+
+// Endpoint for frontend to check & trigger any due slots (guarantees Render free-tier catch-up)
+app.all('/api/notes-scheduler/check-and-dispatch', async (req, res) => {
+  const result = await checkAndDispatch3xSlots();
+  return res.json({ success: true, ...result });
+});
+
+// Endpoint to view scheduler status
+app.get('/api/notes-scheduler/status', async (req, res) => {
+  try {
+    const istString = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
+    const istDate = new Date(istString);
+    const dateKey = `${istDate.getFullYear()}-${String(istDate.getMonth() + 1).padStart(2, '0')}-${String(istDate.getDate()).padStart(2, '0')}`;
+    let logs = [];
+    if (mongoose.connection.readyState === 1) {
+      logs = await EmailDispatchLog.find({ dateKey });
+    }
+    return res.json({
+      success: true,
+      currentTimeIST: istString,
+      dateKey,
+      dispatchedToday: logs,
+      inMemorySlots: Array.from(sentEmailSlotsToday)
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Manual test trigger endpoint
 app.all('/api/notes-scheduler/trigger', async (req, res) => {
   try {
     const targetEmail = req.query.email || req.body?.email || 'sataparahetkumar786@gmail.com';
