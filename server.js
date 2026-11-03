@@ -331,20 +331,38 @@ const mailTransporter = nodemailer.createTransport({
   }
 });
 
-// Function to generate premium responsive HTML email for Notes & Tasks
-const buildNotesReminderEmailHtml = (userEmail, notes, timeSlotLabel) => {
-  const pendingTasks = [];
-  const completedTasks = [];
-  const textNotes = [];
+// HTML entity escaping helper for safe email rendering
+function escapeEmailHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
-  notes.forEach(note => {
-    if (note.type === 'task' || Array.isArray(note.checklist)) {
-      (note.checklist || []).forEach(item => {
-        if (item.completed) completedTasks.push({ noteTitle: note.title, text: item.text });
-        else pendingTasks.push({ noteTitle: note.title, text: item.text });
+// Function to generate premium responsive HTML email for Notes & Tasks
+// Pinned notes are placed strictly at the TOP so the user can read them immediately
+const buildNotesReminderEmailHtml = (userEmail, notes, timeSlotLabel) => {
+  const safeNotes = Array.isArray(notes) ? notes : [];
+
+  // Sort notes so PINNED notes are strictly on top
+  const pinnedNotes = safeNotes.filter(n => n && (n.pinned === true || n.pinned === 'true'));
+  const regularNotes = safeNotes.filter(n => !n || (n.pinned !== true && n.pinned !== 'true'));
+  const totalNotesCount = safeNotes.length;
+
+  let totalChecklistItems = 0;
+  let pendingTasksCount = 0;
+  let completedTasksCount = 0;
+
+  safeNotes.forEach(note => {
+    if (Array.isArray(note.checklist)) {
+      note.checklist.forEach(item => {
+        totalChecklistItems++;
+        if (item.completed) completedTasksCount++;
+        else pendingTasksCount++;
       });
-    } else {
-      textNotes.push(note);
     }
   });
 
@@ -352,103 +370,159 @@ const buildNotesReminderEmailHtml = (userEmail, notes, timeSlotLabel) => {
     weekday: 'long', year: 'numeric', month: 'short', day: 'numeric'
   });
 
-  return `
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <meta charset="utf-8">
-    <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #0b0f19; color: #f8fafc; margin: 0; padding: 20px; }
-      .container { max-width: 600px; margin: 0 auto; background-color: #111827; border: 1px solid #374151; border-radius: 16px; overflow: hidden; }
-      .header { background: linear-gradient(135deg, #590907 0%, #1e1b4b 100%); padding: 24px 28px; border-bottom: 2px solid #e11d48; text-align: center; }
-      .header h1 { margin: 0; color: #E8D2B5; font-size: 22px; letter-spacing: 1px; }
-      .header p { margin: 6px 0 0 0; color: #94a3b8; font-size: 13px; }
-      .badge { display: inline-block; background-color: #e11d48; color: #ffffff; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; text-transform: uppercase; margin-top: 10px; }
-      .content { padding: 24px; }
-      .stats-grid { display: flex; gap: 12px; margin-bottom: 20px; }
-      .stat-card { flex: 1; background-color: #1f2937; border-radius: 10px; padding: 12px; text-align: center; border: 1px solid #374151; }
-      .stat-num { font-size: 20px; font-weight: 900; color: #38bdf8; }
-      .stat-label { font-size: 11px; color: #9ca3af; text-transform: uppercase; margin-top: 2px; }
-      .section-title { font-size: 14px; font-weight: 800; color: #E8D2B5; text-transform: uppercase; margin: 18px 0 10px 0; border-left: 3px solid #e11d48; padding-left: 8px; }
-      .task-item { background-color: #1e293b; border-radius: 8px; padding: 10px 14px; margin-bottom: 6px; display: flex; align-items: center; border: 1px solid #334155; }
-      .task-pending { color: #f8fafc; font-size: 13px; font-weight: 600; }
-      .task-done { color: #64748b; font-size: 13px; text-decoration: line-through; }
-      .note-card { background-color: #1e293b; border-left: 4px solid #38bdf8; border-radius: 8px; padding: 12px 16px; margin-bottom: 10px; border-top: 1px solid #334155; border-right: 1px solid #334155; border-bottom: 1px solid #334155; }
-      .note-title { font-size: 14px; font-weight: 700; color: #38bdf8; margin: 0 0 6px 0; }
-      .note-body { font-size: 12px; color: #cbd5e1; line-height: 1.5; white-space: pre-wrap; margin: 0; }
-      .footer { background-color: #0f172a; padding: 16px; text-align: center; border-top: 1px solid #1e293b; font-size: 11px; color: #64748b; }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <div class="header">
-        <h1>SHADOW DASHBOARD</h1>
-        <p>Your Personal Notes & Daily Tasks Reminder • ${nowFormatted}</p>
-        <span class="badge">${timeSlotLabel} EDITION</span>
-      </div>
-      <div class="content">
-        <div class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-num">${notes.length}</div>
-            <div class="stat-label">Total Notes</div>
+  const renderNoteCard = (note, isPinned) => {
+    const title = note.title || 'Untitled Note';
+    const content = note.content || '';
+    const checklist = Array.isArray(note.checklist) ? note.checklist : [];
+    const dateStr = note.createdAt || note.date || '';
+    const color = note.color || (isPinned ? '#f59e0b' : '#38bdf8');
+
+    return `
+      <div style="margin-bottom: 16px; background-color: ${isPinned ? '#fffdf7' : '#ffffff'}; border: 1.5px solid ${isPinned ? '#fcd34d' : '#e2e8f0'}; border-left: 6px solid ${color}; border-radius: 12px; padding: 18px 20px; box-shadow: 0 2px 8px rgba(0,0,0,${isPinned ? '0.06' : '0.03'});">
+        <!-- Note Header -->
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; flex-wrap: wrap; gap: 6px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            ${isPinned ? `
+              <span style="display: inline-block; background-color: #fef3c7; color: #b45309; border: 1px solid #fde68a; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 900; letter-spacing: 0.5px;">
+                📌 PINNED NOTE
+              </span>
+            ` : ''}
+            <h3 style="margin: 0; font-size: 16px; font-weight: 900; color: #0f172a; letter-spacing: -0.2px;">
+              ${escapeEmailHtml(title)}
+            </h3>
           </div>
-          <div class="stat-card">
-            <div class="stat-num" style="color: #f87171;">${pendingTasks.length}</div>
-            <div class="stat-label">Pending Tasks</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-num" style="color: #4ade80;">${completedTasks.length}</div>
-            <div class="stat-label">Done Tasks</div>
-          </div>
+          ${dateStr ? `<span style="font-size: 11px; color: #64748b; font-weight: 700;">${escapeEmailHtml(dateStr)}</span>` : ''}
         </div>
 
-        ${pendingTasks.length > 0 ? `
-          <div class="section-title">Pending Checklist Tasks (${pendingTasks.length})</div>
-          ${pendingTasks.map(t => `
-            <div class="task-item">
-              <span style="color:#ef4444; margin-right: 8px; font-weight:bold;">[  ]</span>
-              <span class="task-pending">${t.text}</span>
-              ${t.noteTitle ? `<span style="margin-left:auto; font-size:10px; color:#94a3b8; background:#0f172a; padding:2px 6px; border-radius:4px;">${t.noteTitle}</span>` : ''}
-            </div>
-          `).join('')}
+        <!-- Note Text Body (Full text directly readable in email) -->
+        ${content ? `
+          <div style="font-size: 13.5px; line-height: 1.6; color: #334155; white-space: pre-wrap; font-weight: 500; margin-top: 8px; margin-bottom: ${checklist.length > 0 ? '12px' : '0'};">
+            ${escapeEmailHtml(content)}
+          </div>
         ` : ''}
 
-        ${completedTasks.length > 0 ? `
-          <div class="section-title">Completed Tasks (${completedTasks.length})</div>
-          ${completedTasks.map(t => `
-            <div class="task-item" style="opacity: 0.7;">
-              <span style="color:#22c55e; margin-right: 8px; font-weight:bold;">[&#10003;]</span>
-              <span class="task-done">${t.text}</span>
+        <!-- Checklist Items (if any) -->
+        ${checklist.length > 0 ? `
+          <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #f1f5f9;">
+            <div style="font-size: 11px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.5px;">
+              Checklist Tasks (${checklist.filter(c => !c.completed).length} pending, ${checklist.filter(c => c.completed).length} done):
             </div>
-          `).join('')}
+            ${checklist.map(item => `
+              <div style="display: flex; align-items: flex-start; gap: 8px; padding: 6px 10px; margin-bottom: 4px; background-color: ${item.completed ? '#f8fafc' : '#ffffff'}; border: 1px solid ${item.completed ? '#e2e8f0' : '#cbd5e1'}; border-radius: 6px; font-size: 12.5px;">
+                <span style="font-weight: 900; font-family: monospace; color: ${item.completed ? '#16a34a' : '#ef4444'}; flex-shrink: 0;">
+                  ${item.completed ? '[✔]' : '[  ]'}
+                </span>
+                <span style="color: ${item.completed ? '#94a3b8' : '#0f172a'}; text-decoration: ${item.completed ? 'line-through' : 'none'}; font-weight: ${item.completed ? '500' : '700'}; line-height: 1.4;">
+                  ${escapeEmailHtml(item.text)}
+                </span>
+              </div>
+            `).join('')}
+          </div>
         ` : ''}
 
-        ${textNotes.length > 0 ? `
-          <div class="section-title">Saved Notes (${textNotes.length})</div>
-          ${textNotes.map(n => `
-            <div class="note-card" style="border-left-color: ${n.color || '#38bdf8'};">
-              <div class="note-title">${n.title || 'Untitled Note'}</div>
-              <p class="note-body">${n.content || ''}</p>
-              ${Array.isArray(n.attachments) && n.attachments.length > 0 ? `
-                <div style="margin-top: 8px; font-size: 11px; color: #38bdf8; font-weight: bold; background: #0f172a; padding: 6px 10px; border-radius: 6px; border: 1px solid #334155;">
-                  📎 Attachments (${n.attachments.length}): ${n.attachments.map(a => `${a.type === 'photo' ? '📷' : a.type === 'video' ? '🎥' : a.type === 'audio' ? '🎵' : '📄'} ${a.name}`).join(', ')}
-                </div>
-              ` : ''}
-            </div>
-          `).join('')}
-        ` : ''}
-
-        ${notes.length === 0 ? `
-          <p style="text-align:center; color:#94a3b8; padding:30px 0;">No active notes found. Add your tasks and notes in Shadow Dashboard to receive reminders.</p>
+        <!-- Attachments Pill (if any) -->
+        ${Array.isArray(note.attachments) && note.attachments.length > 0 ? `
+          <div style="margin-top: 10px; font-size: 11.5px; color: #2563eb; font-weight: 700; background-color: #eff6ff; padding: 6px 10px; border-radius: 6px; border: 1px solid #bfdbfe;">
+            📎 Attachments (${note.attachments.length}): ${note.attachments.map(a => `${a.type === 'photo' ? '📷' : a.type === 'video' ? '🎥' : a.type === 'audio' ? '🎵' : '📄'} ${escapeEmailHtml(a.name)}`).join(', ')}
+          </div>
         ` : ''}
       </div>
-      <div class="footer">
-        Automated reminder delivered to <strong>${userEmail}</strong> • Synced across laptop and mobile.
-      </div>
+    `;
+  };
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shadow Notes Daily Briefing</title>
+  <style>
+    body { margin: 0; padding: 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #0f172a; }
+    .email-wrapper { max-width: 640px; margin: 24px auto; background-color: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
+    .email-header { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 26px 28px; text-align: center; border-bottom: 3px solid #BDC3C7; }
+    .email-header h1 { margin: 0; color: #ffffff; font-size: 22px; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; }
+    .email-header p { margin: 6px 0 0 0; color: #94a3b8; font-size: 13px; font-weight: 600; }
+    .edition-badge { display: inline-block; background-color: #ffffff; color: #0f172a; padding: 4px 14px; border-radius: 20px; font-size: 11px; font-weight: 900; letter-spacing: 0.6px; text-transform: uppercase; margin-top: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.2); }
+    .email-body { padding: 24px 28px; }
+    .stats-row { display: flex; gap: 10px; margin-bottom: 22px; }
+    .stat-box { flex: 1; background-color: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; padding: 12px 8px; text-align: center; }
+    .stat-val { font-size: 20px; font-weight: 900; color: #0f172a; line-height: 1.2; }
+    .stat-lbl { font-size: 10px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-top: 4px; letter-spacing: 0.5px; }
+    .section-heading { font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.8px; margin: 24px 0 12px 0; display: flex; align-items: center; gap: 8px; }
+    .footer { background-color: #f8fafc; border-top: 1px solid #e2e8f0; padding: 18px 24px; text-align: center; font-size: 11.5px; color: #64748b; line-height: 1.5; }
+    @media (max-width: 600px) {
+      .email-wrapper { margin: 0; border-radius: 0; border: none; }
+      .email-header { padding: 20px 16px; }
+      .email-body { padding: 16px 14px; }
+      .stats-row { flex-wrap: wrap; }
+      .stat-box { min-width: 45%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="email-wrapper">
+    <!-- Header -->
+    <div class="email-header">
+      <h1>SHADOW DASHBOARD</h1>
+      <p>Personal Notes & Daily Briefing • ${nowFormatted}</p>
+      <div class="edition-badge">${escapeEmailHtml(timeSlotLabel)}</div>
     </div>
-  </body>
-  </html>
-  `;
+
+    <!-- Main Content -->
+    <div class="email-body">
+      <!-- Summary Metric Cards -->
+      <div class="stats-row">
+        <div class="stat-box">
+          <div class="stat-val">${totalNotesCount}</div>
+          <div class="stat-lbl">Total Notes</div>
+        </div>
+        <div class="stat-box" style="background-color: #fffbeb; border-color: #fde68a;">
+          <div class="stat-val" style="color: #b45309;">${pinnedNotes.length}</div>
+          <div class="stat-lbl" style="color: #b45309;">📌 Pinned</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-val" style="color: #ef4444;">${pendingTasksCount}</div>
+          <div class="stat-lbl">Pending Tasks</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-val" style="color: #16a34a;">${completedTasksCount}</div>
+          <div class="stat-lbl">Completed</div>
+        </div>
+      </div>
+
+      <!-- SECTION 1: PINNED NOTES AT THE VERY TOP -->
+      ${pinnedNotes.length > 0 ? `
+        <div class="section-heading" style="color: #b45309; border-bottom: 2px solid #fde68a; padding-bottom: 6px;">
+          <span>📌 PINNED PRIORITY NOTES (${pinnedNotes.length})</span>
+        </div>
+        ${pinnedNotes.map(n => renderNoteCard(n, true)).join('')}
+      ` : ''}
+
+      <!-- SECTION 2: ALL OTHER SAVED NOTES -->
+      ${regularNotes.length > 0 ? `
+        <div class="section-heading" style="color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 6px; ${pinnedNotes.length > 0 ? 'margin-top: 28px;' : ''}">
+          <span>📝 ALL SAVED NOTES (${regularNotes.length})</span>
+        </div>
+        ${regularNotes.map(n => renderNoteCard(n, false)).join('')}
+      ` : ''}
+
+      ${totalNotesCount === 0 ? `
+        <div style="text-align: center; padding: 40px 20px; color: #64748b;">
+          <div style="font-size: 32px; margin-bottom: 8px;">📝</div>
+          <p style="font-size: 15px; font-weight: 700; color: #0f172a; margin: 0 0 6px 0;">No active notes found</p>
+          <p style="font-size: 12.5px; margin: 0;">Add your notes and tasks in Shadow Dashboard to receive them directly in this email briefing.</p>
+        </div>
+      ` : ''}
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      Automated briefing delivered directly to <strong>${escapeEmailHtml(userEmail)}</strong>.<br>
+      Notes and tasks are synced real-time across your laptop and mobile device.
+    </div>
+  </div>
+</body>
+</html>`;
 };
 
 // Route to manually or programmatically trigger reminder email for signed user
@@ -471,12 +545,14 @@ app.post('/api/notes/send-reminder-email', async (req, res) => {
 
     const slot = slotLabel || 'Instant Notes & Tasks';
     const htmlBody = buildNotesReminderEmailHtml(cleanEmail, userNotes, slot);
+    const pinnedCount = userNotes.filter(n => n && (n.pinned === true || n.pinned === 'true')).length;
+    const subjectLine = `📌 Shadow Notes [${slot}]: ${pinnedCount > 0 ? `${pinnedCount} Pinned • ` : ''}${userNotes.length} Notes Ready to Read`;
 
     try {
       const info = await mailTransporter.sendMail({
         from: `"Shadow Dashboard" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
         to: cleanEmail,
-        subject: `Shadow Notes Reminder: ${userNotes.length} Notes & Tasks [${slot}]`,
+        subject: subjectLine,
         html: htmlBody
       });
       console.log(`[Email Reminder] Successfully sent notes email to ${cleanEmail}: ${info.messageId}`);
@@ -539,10 +615,13 @@ async function dispatchDailyNotesScheduler(slot, targetEmailOverride = null) {
         : [{ title: 'Daily Focus & Priorities', content: 'Organize your daily tasks, check Watcher reminders, and review active notes.', pinned: true, date: new Date().toLocaleDateString() }];
       
       const html = buildNotesReminderEmailHtml(u.email, userNotes, slot);
+      const pinnedCount = userNotes.filter(n => n && (n.pinned === true || n.pinned === 'true')).length;
+      const subjectLine = `📌 Shadow Notes [${slot}]: ${pinnedCount > 0 ? `${pinnedCount} Pinned • ` : ''}${userNotes.length} Notes Ready to Read`;
+
       const info = await mailTransporter.sendMail({
         from: `"Shadow Dashboard" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
         to: u.email,
-        subject: `Shadow Notes Reminder: ${userNotes.length} Notes & Tasks [${slot}]`,
+        subject: subjectLine,
         html
       });
       console.log(`[3x Daily Scheduler] Successfully dispatched email to ${u.email} for [${slot}]: ${info.messageId}`);
