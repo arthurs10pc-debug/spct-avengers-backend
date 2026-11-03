@@ -22,7 +22,12 @@ const io = new Server(server, {
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://Arthur:Darsh50060Secure@cluster0.o6vkjit.mongodb.net/spct_avengers?retryWrites=true&w=majority&appName=Cluster0";
 
 mongoose.connect(MONGO_URI)
-  .then(() => console.log("Connected to Shadow MongoDB."))
+  .then(async () => {
+    console.log("Connected to Shadow MongoDB.");
+    try {
+      await mongoose.connection.db.collection('users').dropIndex('phone_1');
+    } catch (e) {}
+  })
   .catch((err) => console.log("MongoDB connection fallback:", err.message));
 
 const logSchema = new mongoose.Schema({
@@ -228,22 +233,90 @@ app.get('/api/user/sync-data', async (req, res) => {
   }
 });
 
+// Helper: Non-destructive intelligent expense merge
+const mergeExpenses = (existingList = [], incomingList = [], deletedIds = []) => {
+  const deletedSet = new Set((Array.isArray(deletedIds) ? deletedIds : []).map(id => String(id)));
+  const map = new Map();
+
+  const processExp = (exp) => {
+    if (!exp) return;
+    const rawId = exp.id || `tx_${exp.date || ''}_${exp.title || ''}_${exp.amount || ''}`;
+    const id = String(rawId);
+    if (deletedSet.has(id)) return; // Filter out deleted expense
+
+    const item = {
+      ...exp,
+      id,
+      title: String(exp.title || 'Expense').trim(),
+      amount: parseFloat(exp.amount) || 0,
+      category: exp.category || 'Food & Snacks',
+      type: exp.type || 'expense',
+      date: exp.date || new Date().toISOString().slice(0, 10),
+      createdAt: exp.createdAt || (exp.date ? new Date(exp.date).getTime() : Date.now()) || Date.now()
+    };
+
+    if (map.has(id)) {
+      const prev = map.get(id);
+      if ((item.createdAt || 0) >= (prev.createdAt || 0)) {
+        map.set(id, { ...prev, ...item });
+      }
+    } else {
+      map.set(id, item);
+    }
+  };
+
+  if (Array.isArray(existingList)) existingList.forEach(processExp);
+  if (Array.isArray(incomingList)) incomingList.forEach(processExp);
+
+  const merged = Array.from(map.values());
+  // Sort descending: newest on top
+  merged.sort((a, b) => {
+    const timeA = a.createdAt || (a.date ? new Date(a.date).getTime() : 0);
+    const timeB = b.createdAt || (b.date ? new Date(b.date).getTime() : 0);
+    return timeB - timeA;
+  });
+  return merged;
+};
+
 app.post('/api/user/sync-data', async (req, res) => {
-  const { email, reminders, snoozeMinutes, expenses, monthlyBudget, notes } = req.body;
+  const { email, reminders, snoozeMinutes, expenses, monthlyBudget, notes, deletedExpenseIds, isClearAllExpenses } = req.body;
   if (!email) return res.status(400).json({ error: 'Email is required' });
   const cleanEmail = email.trim().toLowerCase();
 
   try {
+    // 1. Fetch current existing DB record so we never destructively overwrite
+    let existingUser = null;
+    if (mongoose.connection.readyState === 1) {
+      existingUser = await User.findOne({ email: cleanEmail });
+      if (!existingUser) {
+        existingUser = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+      }
+    } else {
+      existingUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+    }
+
+    const currentExpenses = existingUser?.expenses || [];
+    let finalExpenses = [];
+    if (isClearAllExpenses) {
+      finalExpenses = [];
+    } else if (Array.isArray(expenses)) {
+      finalExpenses = mergeExpenses(currentExpenses, expenses, deletedExpenseIds);
+    } else {
+      finalExpenses = currentExpenses;
+    }
+
     const updatedData = {
       email: cleanEmail,
-      reminders: (Array.isArray(reminders) && reminders.length > 0) ? reminders : DEFAULT_REMINDERS,
-      snoozeMinutes: typeof snoozeMinutes === 'number' ? snoozeMinutes : 1,
-      expenses: Array.isArray(expenses) ? expenses : [],
-      monthlyBudget: typeof monthlyBudget === 'number' ? monthlyBudget : 5000,
+      reminders: (Array.isArray(reminders) && reminders.length > 0) ? reminders : (existingUser?.reminders || DEFAULT_REMINDERS),
+      snoozeMinutes: typeof snoozeMinutes === 'number' ? snoozeMinutes : (existingUser?.snoozeMinutes ?? 1),
+      expenses: finalExpenses,
+      monthlyBudget: typeof monthlyBudget === 'number' ? monthlyBudget : (existingUser?.monthlyBudget ?? 5000),
       updatedAt: new Date()
     };
     if (Array.isArray(notes)) {
       updatedData.notes = notes;
+    } else if (existingUser?.notes) {
+      updatedData.notes = existingUser.notes;
     }
 
     if (mongoose.connection.readyState === 1) {
@@ -267,9 +340,149 @@ app.post('/api/user/sync-data', async (req, res) => {
       ...updatedData
     });
 
-    return res.json({ success: true, updatedAt: updatedData.updatedAt });
+    return res.json({ success: true, expenses: finalExpenses, updatedAt: updatedData.updatedAt });
   } catch (err) {
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// Dedicated Real-Time Atomic Expense Endpoints
+app.get('/api/expenses/:email', async (req, res) => {
+  const email = (req.params.email || '').trim().toLowerCase();
+  try {
+    if (mongoose.connection.readyState === 1) {
+      const user = await User.findOne({ email: { $regex: new RegExp(`^${email}$`, 'i') } });
+      return res.json({ success: true, expenses: user?.expenses || [], monthlyBudget: user?.monthlyBudget ?? 5000 });
+    }
+    const memUser = memoryUsers.find(u => u.email.toLowerCase() === email);
+    return res.json({ success: true, expenses: memUser?.expenses || [], monthlyBudget: memUser?.monthlyBudget ?? 5000 });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/expenses/add', async (req, res) => {
+  const { email, expense } = req.body;
+  if (!email || !expense) return res.status(400).json({ success: false, error: 'Email and expense are required' });
+  const cleanEmail = email.trim().toLowerCase();
+
+  try {
+    const rawId = expense.id || `tx_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const newExp = {
+      ...expense,
+      id: String(rawId),
+      title: String(expense.title || '').trim(),
+      amount: parseFloat(expense.amount) || 0,
+      category: expense.category || 'Food & Snacks',
+      type: expense.type || 'expense',
+      date: expense.date || new Date().toISOString().slice(0, 10),
+      createdAt: expense.createdAt || Date.now()
+    };
+
+    let user = null;
+    if (mongoose.connection.readyState === 1) {
+      user = await User.findOne({ email: cleanEmail });
+      if (!user) user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+    } else {
+      user = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+    }
+
+    const currentExpenses = user?.expenses || [];
+    const mergedExpenses = mergeExpenses(currentExpenses, [newExp], []);
+
+    if (mongoose.connection.readyState === 1) {
+      await User.findOneAndUpdate(
+        { email: cleanEmail },
+        { $set: { expenses: mergedExpenses, updatedAt: new Date() } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    } else {
+      if (user) {
+        user.expenses = mergedExpenses;
+        user.updatedAt = new Date();
+      } else {
+        memoryUsers.push({ email: cleanEmail, expenses: mergedExpenses, monthlyBudget: 5000, updatedAt: new Date() });
+      }
+    }
+
+    // Instant Socket Broadcast to ALL connected devices (Mobile, Laptop, Tablets)
+    io.to(`user:${cleanEmail}`).emit('user_data_synced', {
+      email: cleanEmail,
+      expenses: mergedExpenses
+    });
+
+    return res.json({ success: true, item: newExp, expenses: mergedExpenses });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/expenses/delete', async (req, res) => {
+  const { email, id } = req.body;
+  if (!email || !id) return res.status(400).json({ success: false, error: 'Email and id are required' });
+  const cleanEmail = email.trim().toLowerCase();
+  const targetId = String(id);
+
+  try {
+    let user = null;
+    if (mongoose.connection.readyState === 1) {
+      user = await User.findOne({ email: cleanEmail });
+      if (!user) user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+    } else {
+      user = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+    }
+
+    const currentExpenses = user?.expenses || [];
+    const filtered = currentExpenses.filter(e => String(e.id) !== targetId);
+
+    if (mongoose.connection.readyState === 1) {
+      await User.findOneAndUpdate(
+        { email: cleanEmail },
+        { $set: { expenses: filtered, updatedAt: new Date() } },
+        { upsert: true, new: true }
+      );
+    } else if (user) {
+      user.expenses = filtered;
+      user.updatedAt = new Date();
+    }
+
+    io.to(`user:${cleanEmail}`).emit('user_data_synced', {
+      email: cleanEmail,
+      expenses: filtered,
+      deletedExpenseIds: [targetId]
+    });
+
+    return res.json({ success: true, deletedId: targetId, count: filtered.length });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/expenses/clear', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, error: 'Email is required' });
+  const cleanEmail = email.trim().toLowerCase();
+
+  try {
+    if (mongoose.connection.readyState === 1) {
+      await User.findOneAndUpdate(
+        { email: cleanEmail },
+        { $set: { expenses: [], updatedAt: new Date() } },
+        { upsert: true, new: true }
+      );
+    } else {
+      let user = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+      if (user) user.expenses = [];
+    }
+
+    io.to(`user:${cleanEmail}`).emit('user_data_synced', {
+      email: cleanEmail,
+      expenses: []
+    });
+
+    return res.json({ success: true, message: 'All expenses cleared.' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -1156,15 +1369,35 @@ io.on('connection', (socket) => {
   socket.on('sync_user_data_realtime', async (payload) => {
     if (!payload || !payload.email) return;
     const cleanEmail = payload.email.trim().toLowerCase();
+
+    let existingUser = null;
+    try {
+      if (mongoose.connection.readyState === 1) {
+        existingUser = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+      } else {
+        existingUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
+      }
+    } catch (e) {}
+
+    const currentExpenses = existingUser?.expenses || [];
+    let finalExpenses = currentExpenses;
+    if (payload.isClearAllExpenses) {
+      finalExpenses = [];
+    } else if (Array.isArray(payload.expenses)) {
+      finalExpenses = mergeExpenses(currentExpenses, payload.expenses, payload.deletedExpenseIds);
+    }
+
     const updatedData = {
-      reminders: (Array.isArray(payload.reminders) && payload.reminders.length > 0) ? payload.reminders : DEFAULT_REMINDERS,
-      snoozeMinutes: typeof payload.snoozeMinutes === 'number' ? payload.snoozeMinutes : 1,
-      expenses: Array.isArray(payload.expenses) ? payload.expenses : [],
-      monthlyBudget: typeof payload.monthlyBudget === 'number' ? payload.monthlyBudget : 5000,
+      reminders: (Array.isArray(payload.reminders) && payload.reminders.length > 0) ? payload.reminders : (existingUser?.reminders || DEFAULT_REMINDERS),
+      snoozeMinutes: typeof payload.snoozeMinutes === 'number' ? payload.snoozeMinutes : (existingUser?.snoozeMinutes ?? 1),
+      expenses: finalExpenses,
+      monthlyBudget: typeof payload.monthlyBudget === 'number' ? payload.monthlyBudget : (existingUser?.monthlyBudget ?? 5000),
       updatedAt: new Date()
     };
     if (Array.isArray(payload.notes)) {
       updatedData.notes = payload.notes;
+    } else if (existingUser?.notes) {
+      updatedData.notes = existingUser.notes;
     }
 
     try {
