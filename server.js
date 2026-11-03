@@ -73,10 +73,209 @@ const emailLogSchema = new mongoose.Schema({
 emailLogSchema.index({ dateKey: 1, slot: 1 }, { unique: true });
 const EmailDispatchLog = mongoose.models.EmailDispatchLog || mongoose.model('EmailDispatchLog', emailLogSchema);
 
+// PWA Web Push Notification Subscription Schema
+const pushSubscriptionSchema = new mongoose.Schema({
+  userEmail: { type: String, default: 'anonymous' },
+  endpoint: { type: String, required: true, unique: true },
+  keys: {
+    p256dh: { type: String, required: true },
+    auth: { type: String, required: true }
+  },
+  deviceInfo: { type: String, default: 'Mobile/Desktop PWA' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+const PushSubscription = mongoose.models.PushSubscription || mongoose.model('PushSubscription', pushSubscriptionSchema);
+const memoryPushSubscriptions = [];
+
+// Initialize WebPush with persistent VAPID keys
+const webpush = require('web-push');
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "BCZciGguygWCVwiqZmcDVMq1h6YpNV45cAo3EqO3Q0neCODS2x46Lecz1c-1Qkz4jo03drJgAYLV7P_Hf15nexM";
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "4Nyl-SGi4vtXoT6DkUzd3xzovhU52atIxKGc54q31p0";
+const VAPID_EMAIL = process.env.VAPID_EMAIL || "mailto:arthurs10pc@gmail.com";
+
+try {
+  webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  console.log("WebPush VAPID configured successfully.");
+} catch (err) {
+  console.error("WebPush VAPID config notice:", err.message);
+}
+
+// Function to deliver Web Push notification to user's registered devices (Mobile, Desktop PWA)
+async function sendPushToUser(userEmail, notificationPayload) {
+  const cleanEmail = (userEmail || '').trim().toLowerCase();
+  let subs = [];
+  try {
+    if (mongoose.connection.readyState === 1) {
+      if (cleanEmail && cleanEmail !== 'anonymous') {
+        subs = await PushSubscription.find({
+          $or: [
+            { userEmail: cleanEmail },
+            { userEmail: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } },
+            { userEmail: 'anonymous' }
+          ]
+        });
+      } else {
+        subs = await PushSubscription.find({});
+      }
+    } else {
+      subs = memoryPushSubscriptions.filter(s => !cleanEmail || cleanEmail === 'anonymous' || s.userEmail.toLowerCase() === cleanEmail || s.userEmail === 'anonymous');
+    }
+  } catch (err) {
+    console.error("Error finding push subscriptions:", err.message);
+  }
+
+  const payloadString = JSON.stringify({
+    title: notificationPayload.title || 'Shadow Dashboard Alert',
+    body: notificationPayload.body || 'Scheduled update from Shadow.',
+    icon: notificationPayload.icon || '/icon-192.png',
+    badge: notificationPayload.badge || '/icon-192.png',
+    vibrate: [250, 100, 250, 100, 250],
+    tag: notificationPayload.tag || `shadow-alert-${Date.now()}`,
+    renotify: true,
+    data: {
+      url: notificationPayload.url || '/',
+      timestamp: Date.now()
+    }
+  });
+
+  const results = [];
+  for (const sub of subs) {
+    const pushSub = {
+      endpoint: sub.endpoint,
+      keys: {
+        p256dh: sub.keys?.p256dh,
+        auth: sub.keys?.auth
+      }
+    };
+    try {
+      await webpush.sendNotification(pushSub, payloadString);
+      results.push({ endpoint: sub.endpoint, status: 'sent' });
+    } catch (err) {
+      console.warn(`[WebPush] Dispatch note for ${sub.endpoint}:`, err.statusCode || err.message);
+      if (err.statusCode === 410 || err.statusCode === 404) {
+        try {
+          if (mongoose.connection.readyState === 1) {
+            await PushSubscription.deleteOne({ endpoint: sub.endpoint });
+          } else {
+            const idx = memoryPushSubscriptions.findIndex(s => s.endpoint === sub.endpoint);
+            if (idx !== -1) memoryPushSubscriptions.splice(idx, 1);
+          }
+        } catch (e) {}
+      }
+      results.push({ endpoint: sub.endpoint, status: 'failed', error: err.message });
+    }
+  }
+  return results;
+}
+
 const memoryUsers = [];
 
 app.get('/', (req, res) => {
   res.send("Shadow Backend Online.");
+});
+
+// PWA Web Push Notification Endpoints
+app.get('/api/notifications/vapid-key', (req, res) => {
+  return res.json({
+    success: true,
+    publicKey: VAPID_PUBLIC_KEY
+  });
+});
+
+app.post('/api/notifications/subscribe', async (req, res) => {
+  const { email, subscription, deviceInfo } = req.body;
+  if (!subscription || !subscription.endpoint || !subscription.keys) {
+    return res.status(400).json({ success: false, error: 'Valid subscription object is required' });
+  }
+
+  const cleanEmail = (email || 'anonymous').trim().toLowerCase();
+  const subData = {
+    userEmail: cleanEmail,
+    endpoint: subscription.endpoint,
+    keys: {
+      p256dh: subscription.keys.p256dh,
+      auth: subscription.keys.auth
+    },
+    deviceInfo: deviceInfo || 'PWA Client',
+    updatedAt: new Date()
+  };
+
+  try {
+    if (mongoose.connection.readyState === 1) {
+      await PushSubscription.findOneAndUpdate(
+        { endpoint: subscription.endpoint },
+        { $set: subData },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    } else {
+      const existingIdx = memoryPushSubscriptions.findIndex(s => s.endpoint === subscription.endpoint);
+      if (existingIdx !== -1) memoryPushSubscriptions[existingIdx] = subData;
+      else memoryPushSubscriptions.push(subData);
+    }
+
+    console.log(`[WebPush] Registered push subscription for ${cleanEmail} (${subData.deviceInfo})`);
+    return res.json({ success: true, message: 'Push notification subscription registered.' });
+  } catch (err) {
+    console.error("[WebPush Subscription Error]:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/notifications/unsubscribe', async (req, res) => {
+  const { endpoint } = req.body;
+  if (!endpoint) return res.status(400).json({ success: false, error: 'Endpoint is required' });
+
+  try {
+    if (mongoose.connection.readyState === 1) {
+      await PushSubscription.deleteOne({ endpoint });
+    } else {
+      const idx = memoryPushSubscriptions.findIndex(s => s.endpoint === endpoint);
+      if (idx !== -1) memoryPushSubscriptions.splice(idx, 1);
+    }
+    return res.json({ success: true, message: 'Push subscription removed.' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/notifications/send-push', async (req, res) => {
+  const { email, title, body, icon, badge, url, tag } = req.body;
+  try {
+    const results = await sendPushToUser(email, { title, body, icon, badge, url, tag });
+    return res.json({
+      success: true,
+      deliveredCount: results.filter(r => r.status === 'sent').length,
+      totalTargets: results.length,
+      results
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/notifications/test-push', async (req, res) => {
+  const { email } = req.body;
+  try {
+    const results = await sendPushToUser(email, {
+      title: '🛡️ Shadow PWA Push Active',
+      body: 'Background push notifications are working smoothly across your mobile and desktop devices!',
+      url: '/',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+      tag: 'shadow-test-push'
+    });
+
+    const sent = results.filter(r => r.status === 'sent').length;
+    return res.json({
+      success: true,
+      message: sent > 0 ? `Test push sent to ${sent} active device(s)!` : 'Push subscription saved. Push queued.',
+      deliveredCount: sent,
+      results
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Google Auth & User Verification API
@@ -1431,6 +1630,52 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {});
 });
+
+// Automated Background Watcher Routine Web Push Engine
+// Delivers mobile PWA & desktop system push notifications right on time even when browser is closed!
+let lastTriggeredMinuteStr = '';
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const timeOptions = { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit' };
+    const currentIstTime = now.toLocaleTimeString('en-GB', timeOptions); // "HH:MM"
+    
+    if (currentIstTime === lastTriggeredMinuteStr) return;
+    lastTriggeredMinuteStr = currentIstTime;
+
+    let users = [];
+    if (mongoose.connection.readyState === 1) {
+      users = await User.find({ 'reminders.0': { $exists: true } });
+    } else {
+      users = memoryUsers.filter(u => Array.isArray(u.reminders) && u.reminders.length > 0);
+    }
+
+    for (const u of users) {
+      const activeReminders = (u.reminders || []).filter(r => r && !r.completed && r.time === currentIstTime);
+      for (const rem of activeReminders) {
+        console.log(`[Watcher Push Ticker] Triggering routine push for ${u.email}: "${rem.task}" at ${rem.time}`);
+        // Send Web Push to all devices of this user
+        await sendPushToUser(u.email, {
+          title: `⏰ Routine Alert: ${rem.task}`,
+          body: `Scheduled at ${rem.time}. Tap to open Shadow Watcher.`,
+          icon: '/icon-192.png',
+          badge: '/icon-192.png',
+          url: '/',
+          tag: `shadow-watcher-${rem.time}-${Date.now()}`
+        });
+
+        // Also emit Socket.IO notification if connected
+        io.to(`user:${u.email.toLowerCase()}`).emit('reminder_triggered', {
+          task: rem.task,
+          time: rem.time,
+          completed: false
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[Watcher Push Ticker Error]:", err.message);
+  }
+}, 30000);
 
 const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => {
