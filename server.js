@@ -58,6 +58,8 @@ const userSchema = new mongoose.Schema({
   expenses: { type: Array, default: [] },
   notes: { type: Array, default: [] },
   monthlyBudget: { type: Number, default: 5000 },
+  telegramChatId: { type: String, default: '' },
+  telegramUsername: { type: String, default: '' },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
@@ -1670,12 +1672,21 @@ setInterval(async () => {
           time: rem.time,
           completed: false
         });
+
+        // Also send Telegram alert if user has connected their Telegram
+        if (u.telegramChatId) {
+          telegramBot.sendAlert(u.telegramChatId, `⏰ <b>SHADOW WATCHER ALERT</b>\n\n📌 <b>Routine:</b> ${rem.task}\n🕒 <b>Time:</b> ${rem.time} IST\n\n<i>Tap to view on your dashboard!</i>`);
+        }
       }
     }
   } catch (err) {
     console.error("[Watcher Push Ticker Error]:", err.message);
   }
 }, 30000);
+
+// Initialize Shadow Telegram Bot Service
+const { initTelegramBot } = require('./telegramBot');
+const telegramBot = initTelegramBot({ User, io, mergeExpenses, botToken: process.env.TELEGRAM_BOT_TOKEN });
 
 const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => {
