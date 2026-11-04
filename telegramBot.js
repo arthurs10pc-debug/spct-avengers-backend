@@ -3,7 +3,7 @@
 
 const PRIMARY_EMAIL = 'sataparahetkumar@gmail.com';
 
-function initTelegramBot({ User, io, mergeExpenses, botToken }) {
+function initTelegramBot({ User, io, mergeExpenses, botToken, sendPushToUser }) {
   const token = botToken || process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
     console.warn('[Telegram Bot] TELEGRAM_BOT_TOKEN not provided, skipping initialization.');
@@ -130,10 +130,16 @@ function initTelegramBot({ User, io, mergeExpenses, botToken }) {
       const welcome = `⚡ <b>SHADOW NEURAL ASSISTANT</b>\n\n` +
         `Welcome back, <b>Commander ${user.fullName || senderName}</b>!\n` +
         `Your Telegram is now linked to your <b>Shadow Dashboard</b> in real time.\n\n` +
+        `🕒 <b>Automated 3x Daily Notes & Phone Push Schedule:</b>\n` +
+        `• <b>Morning:</b> 08:00 AM IST\n` +
+        `• <b>Afternoon:</b> 01:00 PM IST\n` +
+        `• <b>Evening:</b> 08:30 PM IST\n` +
+        `<i>Every single note (pinned on top) is automatically dispatched to this bot AND triggers a mobile notification on your phone via Shadow app!</i>\n\n` +
         `📌 <b>Instant Commands:</b>\n` +
+        `• /sendnotes - Instantly dispatch all notes here & fire phone notification\n` +
+        `• /notes - View all Google Keep notes right now\n` +
         `• /status - Live overview of budget, expenses & notes\n` +
         `• /expenses - Recent transactions list\n` +
-        `• /notes - Current Google Keep notes\n` +
         `• /routines - Watcher schedule & reminders\n\n` +
         `💬 <b>Natural Actions (Type anytime):</b>\n` +
         `• <code>150 coffee</code> or <code>200 petrol</code> ➔ Logs expense\n` +
@@ -166,6 +172,7 @@ function initTelegramBot({ User, io, mergeExpenses, botToken }) {
         `💳 <b>Remaining:</b> ₹${remaining.toLocaleString('en-IN')}\n\n` +
         `📝 <b>Google Keep Notes:</b> ${notes.length} total (${pinnedCount} pinned)\n` +
         `⏰ <b>Watcher Routines:</b> ${activeReminders.length} active\n\n` +
+        `🕒 <b>Daily Notes Dispatch:</b> 08:00 AM, 01:00 PM, 08:30 PM IST\n` +
         `🔗 <i>All systems operational & synced across your devices.</i>`;
       return sendMessage(chatId, statusMsg);
     }
@@ -183,17 +190,69 @@ function initTelegramBot({ User, io, mergeExpenses, botToken }) {
       return sendMessage(chatId, listStr);
     }
 
-    // 4. /notes
-    if (rawText === '/notes') {
+    // 4. /notes and /sendnotes / /briefing
+    if (rawText === '/sendnotes' || rawText === '/briefing' || rawText === '/notes') {
       const notes = user.notes || [];
-      if (notes.length === 0) {
-        return sendMessage(chatId, '📝 No notes found. Send <code>Note: your text</code> to add one!');
+      const pinnedNotes = notes.filter(n => n && (n.pinned === true || n.pinned === 'true'));
+      const regularNotes = notes.filter(n => !n || (n.pinned !== true && n.pinned !== 'true'));
+      const sortedNotes = [...pinnedNotes, ...regularNotes];
+
+      if (sortedNotes.length === 0) {
+        return sendMessage(chatId, '📝 <b>No notes found.</b>\nSend <code>Note: your text</code> or <code>Pin note: important</code> here to add one anytime!');
       }
-      let notesStr = `📝 <b>YOUR GOOGLE KEEP NOTES (${notes.length}):</b>\n\n`;
-      notes.forEach((n, idx) => {
-        const pinIcon = n.pinned ? '⭐ [PINNED] ' : '';
-        notesStr += `${idx + 1}. ${pinIcon}<b>${n.title || 'Note'}</b>\n${n.content ? `   ${n.content}\n` : ''}`;
+
+      const nowIST = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
+      const dateIST = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
+
+      let notesStr = `⚡ <b>SHADOW NOTES BRIEFING</b>\n` +
+        `🕒 <b>Time:</b> ${nowIST} IST (${dateIST})\n` +
+        `📊 <b>Total Notes:</b> ${sortedNotes.length} (${pinnedNotes.length} Pinned ⭐)\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+      sortedNotes.forEach((n, idx) => {
+        const isPinned = n.pinned === true || n.pinned === 'true';
+        const pinBadge = isPinned ? '⭐ <b>[PINNED]</b> ' : `<b>#${idx + 1}</b> `;
+        const title = (n.title || (n.type === 'task' ? 'Task Item' : 'Note')).trim();
+        const content = (n.content || '').trim();
+        const dateStr = n.date || n.createdAt || '';
+
+        const escapeTg = (str) => String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+        notesStr += `${pinBadge}<b>${escapeTg(title)}</b>\n`;
+        if (content) {
+          notesStr += `📄 ${escapeTg(content)}\n`;
+        }
+        if (Array.isArray(n.checklist) && n.checklist.length > 0) {
+          n.checklist.forEach(c => {
+            notesStr += `${c.completed ? '✅' : '⬜'} ${escapeTg(c.text || '')}\n`;
+          });
+        }
+        if (dateStr) {
+          notesStr += `🕒 <i>Saved: ${escapeTg(dateStr)}</i>\n`;
+        }
+        notesStr += `\n`;
       });
+
+      notesStr += `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🔔 <b>Automated Delivery Schedule:</b>\n` +
+        `• Morning 08:00 AM IST\n` +
+        `• Afternoon 01:00 PM IST\n` +
+        `• Evening 08:30 PM IST\n\n` +
+        `📱 <i>Auto-synced to your mobile app & desktop screens!</i>`;
+
+      // Trigger Web Push Notification if sendnotes requested or on demand
+      if (typeof sendPushToUser === 'function') {
+        const topNotesPreview = sortedNotes.slice(0, 3).map(n => (n.pinned ? '⭐ ' : '• ') + (n.title || 'Note')).join('\n');
+        sendPushToUser(user.email, {
+          title: `📝 Shadow Notes Briefing [${nowIST} IST]`,
+          body: `${sortedNotes.length} notes ready (${pinnedNotes.length} pinned):\n${topNotesPreview}`,
+          icon: '/icon-192.png',
+          badge: '/icon-192.png',
+          url: '/?tab=notes',
+          tag: `shadow-instant-briefing-${Date.now()}`
+        }).catch(err => console.warn('[Telegram /sendnotes Push Error]:', err.message));
+      }
+
       return sendMessage(chatId, notesStr);
     }
 

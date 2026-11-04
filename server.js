@@ -40,9 +40,9 @@ const logSchema = new mongoose.Schema({
 const CommandLog = mongoose.model('CommandLog', logSchema);
 
 const DEFAULT_REMINDERS = [
-  { task: "Morning Review & Focus", time: "09:00", completed: false },
-  { task: "Afternoon Work & Tasks", time: "14:00", completed: false },
-  { task: "Evening Wrap Up & Notes", time: "20:00", completed: false }
+  { task: "Morning Review & Focus", time: "08:00", completed: false },
+  { task: "Afternoon Work & Tasks", time: "13:00", completed: false },
+  { task: "Evening Wrap Up & Notes", time: "20:30", completed: false }
 ];
 
 const userSchema = new mongoose.Schema({
@@ -114,7 +114,10 @@ async function sendPushToUser(userEmail, notificationPayload) {
           $or: [
             { userEmail: cleanEmail },
             { userEmail: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } },
-            { userEmail: 'anonymous' }
+            { userEmail: 'anonymous' },
+            { userEmail: { $exists: false } },
+            { userEmail: null },
+            { userEmail: '' }
           ]
         });
       } else {
@@ -478,6 +481,15 @@ const mergeExpenses = (existingList = [], incomingList = [], deletedIds = []) =>
   });
   return merged;
 };
+
+// Initialize Shadow Telegram Bot Service (Accessible across entire backend)
+const { initTelegramBot } = require('./telegramBot');
+let telegramBot = null;
+try {
+  telegramBot = initTelegramBot({ User, io, mergeExpenses, botToken: process.env.TELEGRAM_BOT_TOKEN, sendPushToUser });
+} catch (tgInitErr) {
+  console.warn('[Telegram Bot Init Warning]:', tgInitErr.message);
+}
 
 app.post('/api/user/sync-data', async (req, res) => {
   const { email, reminders, snoozeMinutes, expenses, monthlyBudget, notes, deletedExpenseIds, isClearAllExpenses } = req.body;
@@ -981,11 +993,79 @@ app.post('/api/notes/send-reminder-email', async (req, res) => {
   }
 });
 
-// Automated 3-Times-A-Day Email Scheduler (Morning 09:00 AM, Afternoon 02:00 PM, Evening 08:00 PM IST)
+// Helper function: Format notes cleanly for Telegram bot with HTML escaping & chunking
+// Pinned notes are positioned strictly on top!
+function formatNotesForTelegram(notes, slot) {
+  const safeNotes = Array.isArray(notes) ? notes : [];
+  const pinnedNotes = safeNotes.filter(n => n && (n.pinned === true || n.pinned === 'true'));
+  const regularNotes = safeNotes.filter(n => !n || (n.pinned !== true && n.pinned !== 'true'));
+  const sortedNotes = [...pinnedNotes, ...regularNotes];
+
+  const nowIST = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
+  const dateIST = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
+
+  let header = `⚡ <b>SHADOW 3X DAILY NOTES BRIEFING</b>\n`;
+  header += `🕒 <b>Scheduled Slot:</b> ${slot} (IST)\n`;
+  header += `📅 <b>Date:</b> ${dateIST} | ${nowIST}\n`;
+  header += `📊 <b>Total Notes:</b> ${sortedNotes.length} (${pinnedNotes.length} Pinned ⭐)\n`;
+  header += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  if (sortedNotes.length === 0) {
+    header += `📝 <i>No notes currently saved in your Shadow Dashboard.</i>\n\n`;
+    header += `Type <code>Note: your message</code> or <code>Pin note: important</code> here to add one anytime!`;
+    return [header];
+  }
+
+  const chunks = [];
+  let currentChunk = header;
+
+  const escapeTg = (str) => String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  sortedNotes.forEach((n, idx) => {
+    const isPinned = n.pinned === true || n.pinned === 'true';
+    const pinBadge = isPinned ? '⭐ <b>[PINNED]</b> ' : `<b>#${idx + 1}</b> `;
+    const title = (n.title || (n.type === 'task' ? 'Task Item' : 'Note')).trim();
+    const content = (n.content || '').trim();
+    const tags = Array.isArray(n.tags) && n.tags.length > 0 ? ` [${n.tags.join(', ')}]` : '';
+    const dateStr = n.date || n.createdAt || '';
+
+    let block = `${pinBadge}<b>${escapeTg(title)}</b>${escapeTg(tags)}\n`;
+    if (content) {
+      block += `📄 ${escapeTg(content)}\n`;
+    }
+    if (Array.isArray(n.checklist) && n.checklist.length > 0) {
+      n.checklist.forEach(c => {
+        block += `${c.completed ? '✅' : '⬜'} ${escapeTg(c.text || '')}\n`;
+      });
+    }
+    if (dateStr) {
+      block += `🕒 <i>Saved: ${escapeTg(dateStr)}</i>\n`;
+    }
+    block += `\n`;
+
+    if ((currentChunk + block).length > 3800) {
+      chunks.push(currentChunk);
+      currentChunk = `⚡ <b>SHADOW NOTES (Part ${chunks.length + 1}):</b>\n\n` + block;
+    } else {
+      currentChunk += block;
+    }
+  });
+
+  currentChunk += `━━━━━━━━━━━━━━━━━━━━━━\n📱 <i>Auto-synced with Shadow Mobile PWA & Desktop.</i>`;
+  chunks.push(currentChunk);
+  return chunks;
+}
+
+// Automated 3-Times-A-Day Multi-Channel Dispatcher
+// Schedule Slots: Morning 08:00 AM, Afternoon 01:00 PM, Evening 08:30 PM IST
+// Simultaneously delivers:
+// 1. Every note auto-sent to Telegram Bot (@shadow_assistant05_bot) with pinned on top
+// 2. Mobile PWA Push Notification via Shadow App with sound & vibration
+// 3. Formatted HTML Briefing Email
 const sentEmailSlotsToday = new Set();
 
 async function dispatchDailyNotesScheduler(slot, targetEmailOverride = null) {
-  console.log(`[3x Daily Scheduler] Executing automated notes reminder dispatch for slot: ${slot}`);
+  console.log(`[3x Daily Multi-Channel Scheduler] Executing automated dispatch for slot: ${slot}`);
   const results = [];
 
   let usersWithNotes = [];
@@ -994,8 +1074,10 @@ async function dispatchDailyNotesScheduler(slot, targetEmailOverride = null) {
       usersWithNotes = await User.find({
         $or: [
           { 'notes.0': { $exists: true } },
+          { email: 'sataparahetkumar@gmail.com' },
           { email: 'sataparahetkumar786@gmail.com' },
-          { email: 'arthurs10pc@gmail.com' }
+          { email: 'arthurs10pc@gmail.com' },
+          { telegramChatId: { $exists: true, $ne: '' } }
         ]
       });
     } else {
@@ -1005,15 +1087,17 @@ async function dispatchDailyNotesScheduler(slot, targetEmailOverride = null) {
     console.error('[3x Daily Scheduler] DB query error:', err.message);
   }
 
-  // Ensure primary user email is always included
-  const primaryEmail = 'sataparahetkumar786@gmail.com';
+  // Ensure primary user email (sataparahetkumar@gmail.com) is always included
+  const primaryEmail = 'sataparahetkumar@gmail.com';
   if (!usersWithNotes.some(u => u.email && u.email.toLowerCase() === primaryEmail.toLowerCase())) {
-    const memUser = memoryUsers.find(u => u.email && u.email.toLowerCase() === primaryEmail.toLowerCase());
-    if (memUser) {
-      usersWithNotes.push(memUser);
-    } else {
-      usersWithNotes.push({ email: primaryEmail, notes: [] });
-    }
+    try {
+      const primaryUser = await User.findOne({ email: primaryEmail });
+      if (primaryUser) {
+        usersWithNotes.push(primaryUser);
+      } else {
+        usersWithNotes.push({ email: primaryEmail, notes: [], telegramChatId: '1418347247' });
+      }
+    } catch (e) {}
   }
 
   if (targetEmailOverride) {
@@ -1026,40 +1110,137 @@ async function dispatchDailyNotesScheduler(slot, targetEmailOverride = null) {
     try {
       const userNotes = Array.isArray(u.notes) && u.notes.length > 0 
         ? u.notes 
-        : [{ title: 'Daily Focus & Priorities', content: 'Organize your daily tasks, check Watcher reminders, and review active notes.', pinned: true, date: new Date().toLocaleDateString() }];
+        : [{ title: 'Daily Focus & Priorities', content: 'Organize your daily tasks, check Watcher reminders, and review active notes.', pinned: true, date: new Date().toLocaleDateString('en-GB') }];
       
-      const html = buildNotesReminderEmailHtml(u.email, userNotes, slot);
-      const pinnedCount = userNotes.filter(n => n && (n.pinned === true || n.pinned === 'true')).length;
-      const subjectLine = `📌 Shadow Notes [${slot}]: ${pinnedCount > 0 ? `${pinnedCount} Pinned • ` : ''}${userNotes.length} Notes Ready to Read`;
+      // Sort so PINNED notes are strictly on top
+      const pinnedNotes = userNotes.filter(n => n && (n.pinned === true || n.pinned === 'true'));
+      const regularNotes = userNotes.filter(n => !n || (n.pinned !== true && n.pinned !== 'true'));
+      const sortedNotes = [...pinnedNotes, ...regularNotes];
+      const pinnedCount = pinnedNotes.length;
 
-      const info = await mailTransporter.sendMail({
-        from: `"Shadow Dashboard" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
-        to: u.email,
-        subject: subjectLine,
-        html
+      // CHANNEL 1: Telegram Bot Auto-Send
+      let tgSent = false;
+      let targetChatId = u.telegramChatId;
+      if (!targetChatId) {
+        const cmdr = await User.findOne({ telegramChatId: { $exists: true, $ne: '' } });
+        if (cmdr) targetChatId = cmdr.telegramChatId;
+      }
+      if (!targetChatId && (u.email === 'sataparahetkumar@gmail.com' || u.email === 'sataparahetkumar786@gmail.com')) {
+        targetChatId = '1418347247'; // User's confirmed Telegram ID
+      }
+
+      if (telegramBot && telegramBot.sendAlert && targetChatId) {
+        try {
+          const tgChunks = formatNotesForTelegram(sortedNotes, slot);
+          for (const chunk of tgChunks) {
+            await telegramBot.sendAlert(targetChatId, chunk);
+          }
+          tgSent = true;
+          console.log(`[3x Daily Scheduler] Successfully dispatched Telegram notes to chat ${targetChatId} for [${slot}]`);
+        } catch (tgErr) {
+          console.warn(`[3x Daily Scheduler] Telegram dispatch error for ${targetChatId}:`, tgErr.message);
+        }
+      }
+
+      // CHANNEL 2: Mobile PWA & Desktop Push Notification via Shadow App
+      let pushResults = [];
+      try {
+        const topNotesPreview = sortedNotes.slice(0, 3).map(n => {
+          const isP = n.pinned === true || n.pinned === 'true';
+          return (isP ? '⭐ ' : '• ') + (n.title || (n.content ? n.content.slice(0, 30) : 'Note'));
+        }).join('\n');
+
+        const pushTitle = `📝 Shadow Notes [${slot}]`;
+        const pushBody = sortedNotes.length > 0 
+          ? `${pinnedCount > 0 ? `${pinnedCount} pinned • ` : ''}${sortedNotes.length} notes ready:\n${topNotesPreview}`
+          : `Your ${slot} notes digest is ready. Tap to open Shadow.`;
+
+        const istString = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
+        const istDate = new Date(istString);
+        const dateKey = `${istDate.getFullYear()}-${String(istDate.getMonth() + 1).padStart(2, '0')}-${String(istDate.getDate()).padStart(2, '0')}`;
+
+        pushResults = await sendPushToUser(u.email, {
+          title: pushTitle,
+          body: pushBody,
+          icon: '/icon-192.png',
+          badge: '/icon-192.png',
+          vibrate: [250, 100, 250, 100, 250],
+          url: '/?tab=notes',
+          tag: `shadow-notes-digest-${slot.replace(/[^a-zA-Z0-9]/g, '_')}-${dateKey}`,
+          data: {
+            slot,
+            type: '3x_notes_digest',
+            totalNotes: sortedNotes.length,
+            pinnedNotes: pinnedCount,
+            url: '/?tab=notes'
+          }
+        });
+        console.log(`[3x Daily Scheduler] Dispatched Web Push to ${pushResults.length} devices for ${u.email}`);
+      } catch (pushErr) {
+        console.warn(`[3x Daily Scheduler] Web Push dispatch error for ${u.email}:`, pushErr.message);
+      }
+
+      // CHANNEL 3: Formatted HTML Email
+      let emailSent = false;
+      let emailMessageId = null;
+      try {
+        const html = buildNotesReminderEmailHtml(u.email, sortedNotes, slot);
+        const subjectLine = `📌 Shadow Notes [${slot}]: ${pinnedCount > 0 ? `${pinnedCount} Pinned • ` : ''}${sortedNotes.length} Notes Ready to Read`;
+
+        const info = await mailTransporter.sendMail({
+          from: `"Shadow Dashboard" <${process.env.GMAIL_USER || 'arthurs10pc@gmail.com'}>`,
+          to: u.email,
+          subject: subjectLine,
+          html
+        });
+        emailSent = true;
+        emailMessageId = info.messageId;
+        console.log(`[3x Daily Scheduler] Successfully dispatched email to ${u.email} for [${slot}]: ${info.messageId}`);
+      } catch (mailErr) {
+        console.warn(`[3x Daily Scheduler] Email dispatch notice for ${u.email}:`, mailErr.message);
+      }
+
+      results.push({
+        email: u.email,
+        status: (tgSent || pushResults.length > 0 || emailSent) ? 'sent' : 'failed',
+        count: sortedNotes.length,
+        telegram: tgSent,
+        pushCount: pushResults.length,
+        email: emailSent,
+        messageId: emailMessageId
       });
-      console.log(`[3x Daily Scheduler] Successfully dispatched email to ${u.email} for [${slot}]: ${info.messageId}`);
-      results.push({ email: u.email, status: 'sent', count: userNotes.length, messageId: info.messageId });
     } catch (sendErr) {
-      console.error(`[3x Daily Scheduler] Failed sending to ${u.email}:`, sendErr.message);
+      console.error(`[3x Daily Scheduler] Failed processing for ${u.email}:`, sendErr.message);
       results.push({ email: u.email, status: 'error', error: sendErr.message });
     }
   }
   return results;
 }
 
-// Persistent Catch-Up Check Function: Runs on interval, on startup, and when client pings
+// Persistent Catch-Up Check Function: Runs on interval (every 30 seconds)
+// Schedule Slots: Morning 08:00 AM, Afternoon 01:00 PM, Evening 08:30 PM IST
 async function checkAndDispatch3xSlots() {
   try {
     const istString = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
     const istDate = new Date(istString);
     const hours = istDate.getHours();
+    const minutes = istDate.getMinutes();
+    const currentTotalMinutes = hours * 60 + minutes;
     const dateKey = `${istDate.getFullYear()}-${String(istDate.getMonth() + 1).padStart(2, '0')}-${String(istDate.getDate()).padStart(2, '0')}`;
 
     const slotsDue = [];
-    if (hours >= 9) slotsDue.push('Morning 09:00 AM');
-    if (hours >= 14) slotsDue.push('Afternoon 02:00 PM');
-    if (hours >= 20) slotsDue.push('Evening 08:00 PM');
+    // Slot 1: Morning 08:00 AM IST (8 * 60 = 480 min)
+    if (currentTotalMinutes >= 8 * 60) {
+      slotsDue.push('Morning 08:00 AM');
+    }
+    // Slot 2: Afternoon 01:00 PM IST (13 * 60 = 780 min)
+    if (currentTotalMinutes >= 13 * 60) {
+      slotsDue.push('Afternoon 01:00 PM');
+    }
+    // Slot 3: Evening 08:30 PM IST (20 * 60 + 30 = 1230 min)
+    if (currentTotalMinutes >= 20 * 60 + 30) {
+      slotsDue.push('Evening 08:30 PM');
+    }
 
     const executed = [];
 
@@ -1079,7 +1260,7 @@ async function checkAndDispatch3xSlots() {
 
       if (!alreadySent) {
         sentEmailSlotsToday.add(dispatchKey);
-        console.log(`[3x Catch-Up Trigger] Slot ${slot} is due for ${dateKey}. Dispatching now...`);
+        console.log(`[3x Catch-Up Trigger] Slot [${slot}] is due for ${dateKey}. Dispatching now across Telegram, Mobile Push & Email...`);
         const results = await dispatchDailyNotesScheduler(slot);
         if (mongoose.connection.readyState === 1) {
           try {
@@ -1094,7 +1275,12 @@ async function checkAndDispatch3xSlots() {
         executed.push({ slot, results });
       }
     }
-    return { dateKey, hours, slotsDue, executed };
+    return {
+      dateKey,
+      currentTimeIST: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`,
+      slotsDue,
+      executed
+    };
   } catch (err) {
     console.error('[Check 3x Slots Error]:', err.message);
     return { error: err.message };
@@ -1115,15 +1301,27 @@ app.get('/api/notes-scheduler/status', async (req, res) => {
   try {
     const istString = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
     const istDate = new Date(istString);
+    const hours = istDate.getHours();
+    const minutes = istDate.getMinutes();
+    const currentTotalMinutes = hours * 60 + minutes;
     const dateKey = `${istDate.getFullYear()}-${String(istDate.getMonth() + 1).padStart(2, '0')}-${String(istDate.getDate()).padStart(2, '0')}`;
     let logs = [];
     if (mongoose.connection.readyState === 1) {
       logs = await EmailDispatchLog.find({ dateKey });
     }
+
+    const scheduleConfig = [
+      { slot: 'Morning 08:00 AM', timeIST: '08:00', targetMinutes: 480, passed: currentTotalMinutes >= 480 },
+      { slot: 'Afternoon 01:00 PM', timeIST: '13:00', targetMinutes: 780, passed: currentTotalMinutes >= 780 },
+      { slot: 'Evening 08:30 PM', timeIST: '20:30', targetMinutes: 1230, passed: currentTotalMinutes >= 1230 }
+    ];
+
     return res.json({
       success: true,
       currentTimeIST: istString,
+      currentHHMM: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`,
       dateKey,
+      scheduleConfig,
       dispatchedToday: logs,
       inMemorySlots: Array.from(sentEmailSlotsToday)
     });
@@ -1135,8 +1333,8 @@ app.get('/api/notes-scheduler/status', async (req, res) => {
 // Manual test trigger endpoint
 app.all('/api/notes-scheduler/trigger', async (req, res) => {
   try {
-    const targetEmail = req.query.email || req.body?.email || 'sataparahetkumar786@gmail.com';
-    const slot = req.query.slot || req.body?.slot || 'Automated 3x Daily Test';
+    const targetEmail = req.query.email || req.body?.email || 'sataparahetkumar@gmail.com';
+    const slot = req.query.slot || req.body?.slot || 'Instant Notes Briefing Test';
     const results = await dispatchDailyNotesScheduler(slot, targetEmail);
     return res.json({ success: true, message: `Dispatched test email to ${targetEmail}`, results });
   } catch (err) {
@@ -1683,10 +1881,6 @@ setInterval(async () => {
     console.error("[Watcher Push Ticker Error]:", err.message);
   }
 }, 30000);
-
-// Initialize Shadow Telegram Bot Service
-const { initTelegramBot } = require('./telegramBot');
-const telegramBot = initTelegramBot({ User, io, mergeExpenses, botToken: process.env.TELEGRAM_BOT_TOKEN });
 
 const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => {
