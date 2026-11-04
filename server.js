@@ -1,3 +1,10 @@
+process.on('uncaughtException', (err) => {
+  console.error('[Global Uncaught Exception]:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Global Unhandled Rejection]:', reason?.message || reason);
+});
+
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
@@ -158,7 +165,7 @@ async function sendPushToUser(userEmail, notificationPayload) {
       results.push({ endpoint: sub.endpoint, status: 'sent' });
     } catch (err) {
       console.warn(`[WebPush] Dispatch note for ${sub.endpoint}:`, err.statusCode || err.message);
-      if (err.statusCode === 410 || err.statusCode === 404) {
+      if (err.statusCode === 410 || err.statusCode === 404 || err.statusCode === 403) {
         try {
           if (mongoose.connection.readyState === 1) {
             await PushSubscription.deleteOne({ endpoint: sub.endpoint });
@@ -527,7 +534,12 @@ app.post('/api/user/sync-data', async (req, res) => {
       updatedAt: new Date()
     };
     if (Array.isArray(notes)) {
-      updatedData.notes = notes;
+      const isGeneric = notes.length === 2 && notes.some(n => n.id === 'note_preset_1');
+      if (isGeneric && existingUser?.notes?.length >= 3) {
+        updatedData.notes = existingUser.notes;
+      } else {
+        updatedData.notes = notes;
+      }
     } else if (existingUser?.notes) {
       updatedData.notes = existingUser.notes;
     }
@@ -1850,16 +1862,23 @@ setInterval(async () => {
       users = memoryUsers.filter(u => Array.isArray(u.reminders) && u.reminders.length > 0);
     }
 
+    const normalizeTimeStr = (t) => {
+      if (!t) return '';
+      const parts = String(t).trim().split(':');
+      if (parts.length < 2) return '';
+      return `${parts[0].padStart(2, '0')}:${parts[1].slice(0, 2).padStart(2, '0')}`;
+    };
+
     for (const u of users) {
-      const activeReminders = (u.reminders || []).filter(r => r && !r.completed && r.time === currentIstTime);
+      const activeReminders = (u.reminders || []).filter(r => r && !r.completed && normalizeTimeStr(r.time) === currentIstTime);
       for (const rem of activeReminders) {
         console.log(`[Watcher Push Ticker] Triggering routine push for ${u.email}: "${rem.task}" at ${rem.time}`);
         // Send Web Push to all devices of this user
         await sendPushToUser(u.email, {
           title: `⏰ Routine Alert: ${rem.task}`,
           body: `Scheduled at ${rem.time}. Tap to open Shadow Watcher.`,
-          icon: '/icon-192.png',
-          badge: '/icon-192.png',
+          icon: '/shadow-logo.png?v=3',
+          badge: '/shadow-logo.png?v=3',
           url: '/',
           tag: `shadow-watcher-${rem.time}-${Date.now()}`
         });
@@ -1871,9 +1890,10 @@ setInterval(async () => {
           completed: false
         });
 
-        // Also send Telegram alert if user has connected their Telegram
-        if (u.telegramChatId) {
-          telegramBot.sendAlert(u.telegramChatId, `⏰ <b>SHADOW WATCHER ALERT</b>\n\n📌 <b>Routine:</b> ${rem.task}\n🕒 <b>Time:</b> ${rem.time} IST\n\n<i>Tap to view on your dashboard!</i>`);
+        // Also send Telegram alert
+        const tgId = u.telegramChatId || '1418347247';
+        if (telegramBot && telegramBot.sendAlert && tgId) {
+          telegramBot.sendAlert(tgId, `⏰ <b>SHADOW WATCHER ALERT</b>\n\n📌 <b>Routine:</b> ${rem.task}\n🕒 <b>Time:</b> ${rem.time} IST\n\n<i>Tap to view on your dashboard!</i>`);
         }
       }
     }
