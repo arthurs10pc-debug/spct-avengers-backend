@@ -52,6 +52,28 @@ const DEFAULT_REMINDERS = [
   { task: "Evening Wrap Up & Notes", time: "20:30", completed: false }
 ];
 
+const MASTER_EMAIL = 'sataparahetkumar@gmail.com';
+const KNOWN_USER_ALIASES = [
+  'sataparahetkumar@gmail.com',
+  'sataparahetkumar786@gmail.com',
+  'hetsatapara@gmail.com'
+];
+
+function canonicalEmail(email) {
+  if (!email) return MASTER_EMAIL;
+  const clean = String(email).trim().toLowerCase();
+  if (
+    clean === 'sataparahetkumar786@gmail.com' ||
+    clean === 'hetsatapara@gmail.com' ||
+    clean === 'anonymous' ||
+    clean === 'guest' ||
+    clean.includes('satapara')
+  ) {
+    return MASTER_EMAIL;
+  }
+  return clean;
+}
+
 const userSchema = new mongoose.Schema({
   fullName: { type: String, default: '' },
   email: { type: String, required: true, unique: true },
@@ -112,15 +134,18 @@ try {
 
 // Function to deliver Web Push notification to user's registered devices (Mobile, Desktop PWA)
 async function sendPushToUser(userEmail, notificationPayload) {
-  const cleanEmail = (userEmail || '').trim().toLowerCase();
+  const rawEmail = (userEmail || '').trim().toLowerCase();
+  const cEmail = canonicalEmail(rawEmail);
+  const targetEmails = cEmail === MASTER_EMAIL ? Array.from(new Set([rawEmail, MASTER_EMAIL, ...KNOWN_USER_ALIASES])) : [rawEmail];
+
   let subs = [];
   try {
     if (mongoose.connection.readyState === 1) {
-      if (cleanEmail && cleanEmail !== 'anonymous') {
+      if (rawEmail && rawEmail !== 'anonymous') {
         subs = await PushSubscription.find({
           $or: [
-            { userEmail: cleanEmail },
-            { userEmail: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } },
+            { userEmail: { $in: targetEmails } },
+            ...targetEmails.map(em => ({ userEmail: { $regex: new RegExp(`^${em}$`, 'i') } })),
             { userEmail: 'anonymous' },
             { userEmail: { $exists: false } },
             { userEmail: null },
@@ -131,7 +156,11 @@ async function sendPushToUser(userEmail, notificationPayload) {
         subs = await PushSubscription.find({});
       }
     } else {
-      subs = memoryPushSubscriptions.filter(s => !cleanEmail || cleanEmail === 'anonymous' || s.userEmail.toLowerCase() === cleanEmail || s.userEmail === 'anonymous');
+      subs = memoryPushSubscriptions.filter(s => {
+        if (!rawEmail || rawEmail === 'anonymous') return true;
+        const subEm = (s.userEmail || '').toLowerCase();
+        return targetEmails.includes(subEm) || subEm === 'anonymous';
+      });
     }
   } catch (err) {
     console.error("Error finding push subscriptions:", err.message);
@@ -384,7 +413,9 @@ app.post('/api/auth/check-user', async (req, res) => {
 app.get('/api/user/sync-data', async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).json({ error: 'Email is required' });
-  const cleanEmail = email.trim().toLowerCase();
+  const rawEmail = email.trim().toLowerCase();
+  const cleanEmail = canonicalEmail(rawEmail);
+
   try {
     if (mongoose.connection.readyState === 1) {
       let user = await User.findOne({ email: cleanEmail });
@@ -501,7 +532,8 @@ try {
 app.post('/api/user/sync-data', async (req, res) => {
   const { email, reminders, snoozeMinutes, expenses, monthlyBudget, notes, deletedExpenseIds, isClearAllExpenses } = req.body;
   if (!email) return res.status(400).json({ error: 'Email is required' });
-  const cleanEmail = email.trim().toLowerCase();
+  const rawEmail = email.trim().toLowerCase();
+  const cleanEmail = canonicalEmail(rawEmail);
 
   try {
     // 1. Fetch current existing DB record so we never destructively overwrite
@@ -550,6 +582,19 @@ app.post('/api/user/sync-data', async (req, res) => {
         { $set: updatedData },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
+
+      // If updating master Het Satapara, mirror to all known aliases so they never desync
+      if (cleanEmail === MASTER_EMAIL) {
+        for (const alias of KNOWN_USER_ALIASES) {
+          if (alias !== MASTER_EMAIL) {
+            await User.findOneAndUpdate(
+              { email: alias },
+              { $set: { ...updatedData, email: alias } },
+              { upsert: true }
+            );
+          }
+        }
+      }
     } else {
       let memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
       if (memUser) {
@@ -559,10 +604,16 @@ app.post('/api/user/sync-data', async (req, res) => {
       }
     }
 
-    // Broadcast in real-time to all connected devices for this user
-    io.to(`user:${cleanEmail}`).emit('user_data_synced', {
-      email: cleanEmail,
-      ...updatedData
+    // Broadcast in real-time to all connected devices for this user & aliases
+    const targetRooms = cleanEmail === MASTER_EMAIL
+      ? Array.from(new Set([`user:${rawEmail}`, `user:${cleanEmail}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
+      : [`user:${rawEmail}`, `user:${cleanEmail}`];
+
+    targetRooms.forEach(room => {
+      io.to(room).emit('user_data_synced', {
+        email: cleanEmail,
+        ...updatedData
+      });
     });
 
     return res.json({ success: true, expenses: finalExpenses, updatedAt: updatedData.updatedAt });
@@ -1774,17 +1825,24 @@ io.on('connection', (socket) => {
     if (email) {
       const cleanEmail = email.trim().toLowerCase();
       socket.join(`user:${cleanEmail}`);
+      if (canonicalEmail(cleanEmail) === MASTER_EMAIL) {
+        KNOWN_USER_ALIASES.forEach(a => socket.join(`user:${a}`));
+      }
     }
   });
 
   socket.on('sync_user_data_realtime', async (payload) => {
     if (!payload || !payload.email) return;
-    const cleanEmail = payload.email.trim().toLowerCase();
+    const rawEmail = payload.email.trim().toLowerCase();
+    const cleanEmail = canonicalEmail(rawEmail);
 
     let existingUser = null;
     try {
       if (mongoose.connection.readyState === 1) {
-        existingUser = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+        existingUser = await User.findOne({ email: cleanEmail });
+        if (!existingUser) {
+          existingUser = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+        }
       } else {
         existingUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
       }
@@ -1814,10 +1872,22 @@ io.on('connection', (socket) => {
     try {
       if (mongoose.connection.readyState === 1) {
         await User.findOneAndUpdate(
-          { email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } },
+          { email: cleanEmail },
           { $set: updatedData },
           { upsert: true }
         );
+
+        if (cleanEmail === MASTER_EMAIL) {
+          for (const alias of KNOWN_USER_ALIASES) {
+            if (alias !== MASTER_EMAIL) {
+              await User.findOneAndUpdate(
+                { email: alias },
+                { $set: { ...updatedData, email: alias } },
+                { upsert: true }
+              );
+            }
+          }
+        }
       } else {
         let memUser = memoryUsers.find(u => u.email.toLowerCase() === cleanEmail);
         if (memUser) Object.assign(memUser, updatedData);
@@ -1827,10 +1897,16 @@ io.on('connection', (socket) => {
       console.error("DB update error in socket:", e.message);
     }
 
-    // Broadcast in real-time to other connected devices of this user
-    socket.to(`user:${cleanEmail}`).emit('user_data_synced', {
-      email: cleanEmail,
-      ...updatedData
+    // Broadcast in real-time to other connected devices of this user & aliases
+    const targetRooms = cleanEmail === MASTER_EMAIL
+      ? Array.from(new Set([`user:${rawEmail}`, `user:${cleanEmail}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
+      : [`user:${rawEmail}`, `user:${cleanEmail}`];
+
+    targetRooms.forEach(room => {
+      socket.to(room).emit('user_data_synced', {
+        email: cleanEmail,
+        ...updatedData
+      });
     });
   });
 

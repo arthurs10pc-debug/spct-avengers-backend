@@ -2,6 +2,7 @@
 // Real-Time Bi-Directional Mirror with MongoDB & WebSockets
 
 const PRIMARY_EMAIL = 'sataparahetkumar@gmail.com';
+const ALIAS_EMAILS = ['sataparahetkumar786@gmail.com', 'hetsatapara@gmail.com'];
 
 function initTelegramBot({ User, io, mergeExpenses, botToken, sendPushToUser }) {
   const token = botToken || process.env.TELEGRAM_BOT_TOKEN;
@@ -9,6 +10,20 @@ function initTelegramBot({ User, io, mergeExpenses, botToken, sendPushToUser }) 
     console.warn('[Telegram Bot] TELEGRAM_BOT_TOKEN not provided, skipping initialization.');
     return { sendAlert: async () => false };
   }
+
+  const broadcastAll = (payload) => {
+    if (!io) return;
+    const allEmails = [PRIMARY_EMAIL, ...ALIAS_EMAILS];
+    allEmails.forEach(e => io.to(`user:${e}`).emit('user_data_synced', payload));
+  };
+
+  const mirrorAliases = async (updates) => {
+    try {
+      for (const em of ALIAS_EMAILS) {
+        await User.updateOne({ email: em }, { $set: { ...updates, email: em, updatedAt: new Date() } }, { upsert: true });
+      }
+    } catch (e) {}
+  };
 
   const BASE_URL = `https://api.telegram.org/bot${token}`;
   let lastUpdateId = 0;
@@ -293,16 +308,15 @@ function initTelegramBot({ User, io, mergeExpenses, botToken, sendPushToUser }) 
       user.notes = updatedNotes;
       user.updatedAt = new Date();
       await user.save();
+      await mirrorAliases({ notes: updatedNotes, expenses: user.expenses || [], reminders: user.reminders || [] });
 
       // Broadcast in real-time to Laptop and Mobile dashboards
-      if (io) {
-        io.to(`user:${PRIMARY_EMAIL}`).emit('user_data_synced', {
-          email: PRIMARY_EMAIL,
-          notes: updatedNotes,
-          expenses: user.expenses || [],
-          reminders: user.reminders || []
-        });
-      }
+      broadcastAll({
+        email: PRIMARY_EMAIL,
+        notes: updatedNotes,
+        expenses: user.expenses || [],
+        reminders: user.reminders || []
+      });
 
       const reply = `📝 <b>NOTE SAVED TO DASHBOARD!</b>\n\n` +
         `📌 <b>Pinned:</b> ${isPinned ? 'Yes ⭐' : 'No'}\n` +
@@ -329,15 +343,14 @@ function initTelegramBot({ User, io, mergeExpenses, botToken, sendPushToUser }) 
       user.reminders = updatedReminders;
       user.updatedAt = new Date();
       await user.save();
+      await mirrorAliases({ reminders: updatedReminders, notes: user.notes || [], expenses: user.expenses || [] });
 
-      if (io) {
-        io.to(`user:${PRIMARY_EMAIL}`).emit('user_data_synced', {
-          email: PRIMARY_EMAIL,
-          reminders: updatedReminders,
-          notes: user.notes || [],
-          expenses: user.expenses || []
-        });
-      }
+      broadcastAll({
+        email: PRIMARY_EMAIL,
+        reminders: updatedReminders,
+        notes: user.notes || [],
+        expenses: user.expenses || []
+      });
 
       const reply = `⏰ <b>WATCHER REMINDER CREATED!</b>\n\n` +
         `🕒 <b>Time:</b> ${remData.time} IST\n` +
@@ -368,16 +381,15 @@ function initTelegramBot({ User, io, mergeExpenses, botToken, sendPushToUser }) 
       user.expenses = updatedExpenses;
       user.updatedAt = new Date();
       await user.save();
+      await mirrorAliases({ expenses: updatedExpenses, notes: user.notes || [], reminders: user.reminders || [] });
 
       // Real-time broadcast to all open dashboard screens
-      if (io) {
-        io.to(`user:${PRIMARY_EMAIL}`).emit('user_data_synced', {
-          email: PRIMARY_EMAIL,
-          expenses: updatedExpenses,
-          notes: user.notes || [],
-          reminders: user.reminders || []
-        });
-      }
+      broadcastAll({
+        email: PRIMARY_EMAIL,
+        expenses: updatedExpenses,
+        notes: user.notes || [],
+        reminders: user.reminders || []
+      });
 
       // Calculate new budget status
       const currentMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
