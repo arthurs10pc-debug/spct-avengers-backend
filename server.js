@@ -170,18 +170,31 @@ async function sendPushToUser(userEmail, notificationPayload) {
   }
 
   const payloadString = JSON.stringify({
-    title: notificationPayload.title || 'Shadow Dashboard Alert',
+    title: notificationPayload.title || '⏰ Shadow Dashboard Alert',
     body: notificationPayload.body || 'Scheduled update from Shadow.',
     icon: notificationPayload.icon || '/icon-192.png',
     badge: notificationPayload.badge || '/icon-192.png',
-    vibrate: [250, 100, 250, 100, 250],
+    vibrate: notificationPayload.vibrate || [300, 100, 300, 100, 300],
     tag: notificationPayload.tag || `shadow-alert-${Date.now()}`,
     renotify: true,
+    requireInteraction: true,
+    actions: [
+      { action: 'open', title: 'Open & View' },
+      { action: 'dismiss', title: 'Dismiss' }
+    ],
     data: {
       url: notificationPayload.url || '/',
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      task: notificationPayload.task || '',
+      time: notificationPayload.time || '',
+      ...(notificationPayload.data || {})
     }
   });
+
+  const pushOptions = {
+    TTL: 3600, // 1 hour TTL
+    urgency: 'high' // high priority for immediate background wakeup on Windows/Android
+  };
 
   const results = [];
   for (const sub of subs) {
@@ -193,7 +206,7 @@ async function sendPushToUser(userEmail, notificationPayload) {
       }
     };
     try {
-      await webpush.sendNotification(pushSub, payloadString);
+      await webpush.sendNotification(pushSub, payloadString, pushOptions);
       results.push({ endpoint: sub.endpoint, status: 'sent' });
     } catch (err) {
       console.warn(`[WebPush] Dispatch note for ${sub.endpoint}:`, err.statusCode || err.message);
@@ -1919,51 +1932,7 @@ io.on('connection', (socket) => {
     } catch (e) {}
   });
 
-  // Real-Time Socket Broadcast for Reminders Across All Connected Chrome Profiles & Devices
-  socket.on('broadcast_reminder_alert', (payload) => {
-    if (!payload || !payload.task) return;
-    const senderEmail = payload.email ? payload.email.trim().toLowerCase() : '';
-    const cleanEmail = canonicalEmail(senderEmail) || MASTER_EMAIL;
-
-    const targetRooms = (cleanEmail === MASTER_EMAIL)
-      ? Array.from(new Set([`user:${senderEmail}`, `user:${cleanEmail}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
-      : [`user:${senderEmail}`, `user:${cleanEmail}`];
-
-    console.log(`[Socket Broadcast] Emitting reminder_triggered to rooms:`, targetRooms, payload.task);
-    targetRooms.forEach(room => {
-      io.to(room).emit('reminder_triggered', {
-        task: payload.task,
-        time: payload.time || '',
-        id: payload.id || Date.now(),
-        timestamp: Date.now()
-      });
-    });
-  });
-
   socket.on('disconnect', () => {});
-});
-
-// Test Endpoint to trigger real-time reminder animation across all connected tabs & Chrome accounts
-app.post('/api/reminders/test-broadcast', (req, res) => {
-  const { email, task, time } = req.body;
-  const rawEmail = (email || '').trim().toLowerCase();
-  const cleanEmail = canonicalEmail(rawEmail) || MASTER_EMAIL;
-  const targetRooms = (cleanEmail === MASTER_EMAIL)
-    ? Array.from(new Set([`user:${rawEmail}`, `user:${cleanEmail}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
-    : [`user:${rawEmail}`, `user:${cleanEmail}`];
-
-  const payload = {
-    task: task || 'Real-Time Cross-Device Alert Test',
-    time: time || new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
-    id: Date.now(),
-    timestamp: Date.now()
-  };
-
-  targetRooms.forEach(room => {
-    io.to(room).emit('reminder_triggered', payload);
-  });
-
-  return res.json({ success: true, message: `Broadcasted real-time reminder to ${targetRooms.length} rooms`, payload });
 });
 
 // Automated Background Watcher Routine Web Push Engine
@@ -1977,6 +1946,8 @@ setInterval(async () => {
     
     if (currentIstTime === lastTriggeredMinuteStr) return;
     lastTriggeredMinuteStr = currentIstTime;
+
+    const todayIstDate = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }); // "YYYY-MM-DD"
 
     let users = [];
     if (mongoose.connection.readyState === 1) {
@@ -1992,40 +1963,68 @@ setInterval(async () => {
       return `${parts[0].padStart(2, '0')}:${parts[1].slice(0, 2).padStart(2, '0')}`;
     };
 
+    const processedCanonicalEmails = new Set();
+
     for (const u of users) {
+      const cEmail = canonicalEmail(u.email);
+      if (processedCanonicalEmails.has(cEmail)) continue;
+      processedCanonicalEmails.add(cEmail);
+
+      // Daily Routine Auto-Reset: Every morning/midnight, reset completed status so all daily routines trigger every day
+      if (u.lastRoutineResetDate !== todayIstDate) {
+        if (mongoose.connection.readyState === 1) {
+          try {
+            await User.updateMany(
+              { email: { $in: [u.email, cEmail, ...KNOWN_USER_ALIASES] } },
+              { $set: { "reminders.$[].completed": false, lastRoutineResetDate: todayIstDate } }
+            );
+          } catch (e) {}
+        }
+        u.reminders = (u.reminders || []).map(r => ({ ...r, completed: false }));
+        u.lastRoutineResetDate = todayIstDate;
+      }
+
       const activeReminders = (u.reminders || []).filter(r => r && !r.completed && normalizeTimeStr(r.time) === currentIstTime);
       for (const rem of activeReminders) {
         console.log(`[Watcher Push Ticker] Triggering routine push for ${u.email}: "${rem.task}" at ${rem.time}`);
-        // Send Web Push to all devices of this user
+        
+        // Mark as completed for today across alias accounts so it does not re-trigger this minute
+        if (mongoose.connection.readyState === 1) {
+          try {
+            await User.updateMany(
+              { email: { $in: [u.email, cEmail, ...KNOWN_USER_ALIASES] }, "reminders.time": rem.time },
+              { $set: { "reminders.$.completed": true, "reminders.$.lastTriggeredDate": todayIstDate } }
+            );
+          } catch (e) {}
+        }
+        rem.completed = true;
+
+        // 1. Send Native Web Push to all devices (Windows & Android, across all Chrome profiles/accounts)
         await sendPushToUser(u.email, {
-          title: `⏰ Routine Alert: ${rem.task}`,
-          body: `Scheduled at ${rem.time}. Tap to open Shadow Watcher.`,
-          icon: '/shadow-logo.png?v=3',
-          badge: '/shadow-logo.png?v=3',
-          url: '/',
-          tag: `shadow-watcher-${rem.time}-${Date.now()}`
+          title: `⏰ Reminder Alert: ${rem.task}`,
+          body: `Scheduled for ${rem.time} IST. Tap to view & play voice alert.`,
+          icon: '/icon-192.png',
+          badge: '/icon-192.png',
+          url: `/?reminder=${encodeURIComponent(rem.task)}&time=${encodeURIComponent(rem.time)}`,
+          tag: `shadow-watcher-${rem.time}-${todayIstDate}`,
+          task: rem.task,
+          time: rem.time
         });
 
-        // Also emit Socket.IO notification across all connected Chrome profiles, tabs & devices
-        const canon = canonicalEmail(u.email);
-        const targetRooms = (canon === MASTER_EMAIL)
-          ? Array.from(new Set([`user:${u.email.toLowerCase()}`, `user:${canon}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
-          : [`user:${u.email.toLowerCase()}`];
-
-        targetRooms.forEach(room => {
-          io.to(room).emit('reminder_triggered', {
+        // 2. Broadcast Real-time Socket.IO event to all connected tabs/accounts
+        const targetRooms = Array.from(new Set([u.email.toLowerCase(), cEmail.toLowerCase(), ...KNOWN_USER_ALIASES.map(a => a.toLowerCase())]));
+        for (const roomEmail of targetRooms) {
+          io.to(`user:${roomEmail}`).emit('reminder_triggered', {
             task: rem.task,
             time: rem.time,
-            id: rem.id || Date.now(),
-            completed: false,
-            timestamp: Date.now()
+            completed: true
           });
-        });
+        }
 
-        // Also send Telegram alert
+        // 3. Send Instant Telegram Alert
         const tgId = u.telegramChatId || '1418347247';
         if (telegramBot && telegramBot.sendAlert && tgId) {
-          telegramBot.sendAlert(tgId, `⏰ <b>SHADOW WATCHER ALERT</b>\n\n📌 <b>Routine:</b> ${rem.task}\n🕒 <b>Time:</b> ${rem.time} IST\n\n<i>Tap to view on your dashboard!</i>`);
+          telegramBot.sendAlert(tgId, `⏰ <b>SHADOW REMINDER ALERT</b>\n\n📌 <b>Task:</b> ${rem.task}\n🕒 <b>Time:</b> ${rem.time} IST\n\n<i>Tap system notification or open app to view!</i>`);
         }
       }
     }
