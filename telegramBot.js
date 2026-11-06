@@ -2,7 +2,7 @@
 // Real-Time Bi-Directional Mirror with MongoDB & WebSockets
 
 const PRIMARY_EMAIL = 'sataparahetkumar@gmail.com';
-const ALIAS_EMAILS = ['sataparahetkumar786@gmail.com', 'hetsatapara@gmail.com'];
+const ALIAS_EMAILS = ['sataparahetkumar786@gmail.com', 'hetsatapara@gmail.com', 'arthurs10pc@gmail.com'];
 
 function initTelegramBot({ User, io, mergeExpenses, botToken, sendPushToUser }) {
   const token = botToken || process.env.TELEGRAM_BOT_TOKEN;

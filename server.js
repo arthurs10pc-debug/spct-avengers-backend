@@ -56,7 +56,8 @@ const MASTER_EMAIL = 'sataparahetkumar@gmail.com';
 const KNOWN_USER_ALIASES = [
   'sataparahetkumar@gmail.com',
   'sataparahetkumar786@gmail.com',
-  'hetsatapara@gmail.com'
+  'hetsatapara@gmail.com',
+  'arthurs10pc@gmail.com'
 ];
 
 function canonicalEmail(email) {
@@ -65,9 +66,11 @@ function canonicalEmail(email) {
   if (
     clean === 'sataparahetkumar786@gmail.com' ||
     clean === 'hetsatapara@gmail.com' ||
+    clean === 'arthurs10pc@gmail.com' ||
     clean === 'anonymous' ||
     clean === 'guest' ||
-    clean.includes('satapara')
+    clean.includes('satapara') ||
+    clean.includes('arthur')
   ) {
     return MASTER_EMAIL;
   }
@@ -1916,7 +1919,51 @@ io.on('connection', (socket) => {
     } catch (e) {}
   });
 
+  // Real-Time Socket Broadcast for Reminders Across All Connected Chrome Profiles & Devices
+  socket.on('broadcast_reminder_alert', (payload) => {
+    if (!payload || !payload.task) return;
+    const senderEmail = payload.email ? payload.email.trim().toLowerCase() : '';
+    const cleanEmail = canonicalEmail(senderEmail) || MASTER_EMAIL;
+
+    const targetRooms = (cleanEmail === MASTER_EMAIL)
+      ? Array.from(new Set([`user:${senderEmail}`, `user:${cleanEmail}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
+      : [`user:${senderEmail}`, `user:${cleanEmail}`];
+
+    console.log(`[Socket Broadcast] Emitting reminder_triggered to rooms:`, targetRooms, payload.task);
+    targetRooms.forEach(room => {
+      io.to(room).emit('reminder_triggered', {
+        task: payload.task,
+        time: payload.time || '',
+        id: payload.id || Date.now(),
+        timestamp: Date.now()
+      });
+    });
+  });
+
   socket.on('disconnect', () => {});
+});
+
+// Test Endpoint to trigger real-time reminder animation across all connected tabs & Chrome accounts
+app.post('/api/reminders/test-broadcast', (req, res) => {
+  const { email, task, time } = req.body;
+  const rawEmail = (email || '').trim().toLowerCase();
+  const cleanEmail = canonicalEmail(rawEmail) || MASTER_EMAIL;
+  const targetRooms = (cleanEmail === MASTER_EMAIL)
+    ? Array.from(new Set([`user:${rawEmail}`, `user:${cleanEmail}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
+    : [`user:${rawEmail}`, `user:${cleanEmail}`];
+
+  const payload = {
+    task: task || 'Real-Time Cross-Device Alert Test',
+    time: time || new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }),
+    id: Date.now(),
+    timestamp: Date.now()
+  };
+
+  targetRooms.forEach(room => {
+    io.to(room).emit('reminder_triggered', payload);
+  });
+
+  return res.json({ success: true, message: `Broadcasted real-time reminder to ${targetRooms.length} rooms`, payload });
 });
 
 // Automated Background Watcher Routine Web Push Engine
@@ -1959,11 +2006,20 @@ setInterval(async () => {
           tag: `shadow-watcher-${rem.time}-${Date.now()}`
         });
 
-        // Also emit Socket.IO notification if connected
-        io.to(`user:${u.email.toLowerCase()}`).emit('reminder_triggered', {
-          task: rem.task,
-          time: rem.time,
-          completed: false
+        // Also emit Socket.IO notification across all connected Chrome profiles, tabs & devices
+        const canon = canonicalEmail(u.email);
+        const targetRooms = (canon === MASTER_EMAIL)
+          ? Array.from(new Set([`user:${u.email.toLowerCase()}`, `user:${canon}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
+          : [`user:${u.email.toLowerCase()}`];
+
+        targetRooms.forEach(room => {
+          io.to(room).emit('reminder_triggered', {
+            task: rem.task,
+            time: rem.time,
+            id: rem.id || Date.now(),
+            completed: false,
+            timestamp: Date.now()
+          });
         });
 
         // Also send Telegram alert
