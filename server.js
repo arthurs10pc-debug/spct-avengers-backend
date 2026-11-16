@@ -58,7 +58,8 @@ const KNOWN_USER_ALIASES = [
   'sataparahetkumar@gmail.com',
   'sataparahetkumar786@gmail.com',
   'hetsatapara@gmail.com',
-  'arthurs10pc@gmail.com'
+  'arthurs10pc@gmail.com',
+  'iron123man0@gmail.com'
 ];
 
 function canonicalEmail(email) {
@@ -68,10 +69,12 @@ function canonicalEmail(email) {
     clean === 'sataparahetkumar786@gmail.com' ||
     clean === 'hetsatapara@gmail.com' ||
     clean === 'arthurs10pc@gmail.com' ||
+    clean === 'iron123man0@gmail.com' ||
     clean === 'anonymous' ||
     clean === 'guest' ||
     clean.includes('satapara') ||
-    clean.includes('arthur')
+    clean.includes('arthur') ||
+    clean.includes('iron')
   ) {
     return MASTER_EMAIL;
   }
@@ -89,6 +92,7 @@ const userSchema = new mongoose.Schema({
   reminders: { type: Array, default: DEFAULT_REMINDERS },
   snoozeMinutes: { type: Number, default: 1 },
   expenses: { type: Array, default: [] },
+  deletedExpenseIds: { type: Array, default: [] },
   notes: { type: Array, default: [] },
   monthlyBudget: { type: Number, default: 5000 },
   telegramChatId: { type: String, default: '' },
@@ -440,17 +444,27 @@ app.get('/api/user/sync-data', async (req, res) => {
         user = await User.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
       }
       if (!user) {
-        // Auto-provision initial cloud store for this Gmail account so mobile/desktop sync immediately
+        // Auto-provision initial cloud store from master account so mobile/desktop sync immediately with full data
+        const master = await User.findOne({ email: MASTER_EMAIL });
         user = await User.create({
           email: cleanEmail,
           fullName: cleanEmail.split('@')[0],
-          reminders: DEFAULT_REMINDERS,
-          snoozeMinutes: 1,
-          expenses: [],
-          notes: [],
-          monthlyBudget: 5000,
+          reminders: (master && Array.isArray(master.reminders) && master.reminders.length > 0) ? master.reminders : DEFAULT_REMINDERS,
+          snoozeMinutes: master?.snoozeMinutes ?? 1,
+          expenses: master?.expenses || [],
+          notes: master?.notes || [],
+          monthlyBudget: master?.monthlyBudget ?? 5000,
           updatedAt: new Date()
         });
+      } else if ((!user.expenses || user.expenses.length === 0) && (!user.notes || user.notes.length === 0)) {
+        // If existing record has empty data, inherit full dataset from master
+        const master = await User.findOne({ email: MASTER_EMAIL });
+        if (master && (master.expenses?.length > 0 || master.notes?.length > 0)) {
+          user.expenses = master.expenses || [];
+          user.notes = master.notes || [];
+          if (master.reminders?.length > 0) user.reminders = master.reminders;
+          await User.updateOne({ email: cleanEmail }, { $set: { expenses: user.expenses, notes: user.notes, reminders: user.reminders } });
+        }
       }
       const userReminders = (Array.isArray(user.reminders) && user.reminders.length > 0) ? user.reminders : DEFAULT_REMINDERS;
       return res.json({
@@ -460,6 +474,7 @@ app.get('/api/user/sync-data', async (req, res) => {
         expenses: user.expenses || [],
         monthlyBudget: user.monthlyBudget ?? 5000,
         notes: user.notes || [],
+        deletedExpenseIds: user.deletedExpenseIds || [],
         updatedAt: user.updatedAt || new Date()
       });
     } else {
@@ -565,11 +580,14 @@ app.post('/api/user/sync-data', async (req, res) => {
     }
 
     const currentExpenses = existingUser?.expenses || [];
+    const incomingDeleted = Array.isArray(deletedExpenseIds) ? deletedExpenseIds.map(String) : [];
+    const allDeleted = Array.from(new Set([...(existingUser?.deletedExpenseIds || []), ...incomingDeleted]));
+
     let finalExpenses = [];
     if (isClearAllExpenses) {
       finalExpenses = [];
     } else if (Array.isArray(expenses)) {
-      finalExpenses = mergeExpenses(currentExpenses, expenses, deletedExpenseIds);
+      finalExpenses = mergeExpenses(currentExpenses, expenses, allDeleted);
     } else {
       finalExpenses = currentExpenses;
     }
@@ -579,6 +597,7 @@ app.post('/api/user/sync-data', async (req, res) => {
       reminders: (Array.isArray(reminders) && reminders.length > 0) ? reminders : (existingUser?.reminders || DEFAULT_REMINDERS),
       snoozeMinutes: typeof snoozeMinutes === 'number' ? snoozeMinutes : (existingUser?.snoozeMinutes ?? 1),
       expenses: finalExpenses,
+      deletedExpenseIds: allDeleted,
       monthlyBudget: typeof monthlyBudget === 'number' ? monthlyBudget : (existingUser?.monthlyBudget ?? 5000),
       updatedAt: new Date()
     };
@@ -600,10 +619,11 @@ app.post('/api/user/sync-data', async (req, res) => {
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
-      // If updating master Het Satapara, mirror to all known aliases so they never desync
-      if (cleanEmail === MASTER_EMAIL) {
+      // If updating master Het Satapara or any alias, mirror to all known aliases so they never desync
+      const isMasterOrAlias = KNOWN_USER_ALIASES.includes(cleanEmail) || cleanEmail === MASTER_EMAIL;
+      if (isMasterOrAlias) {
         for (const alias of KNOWN_USER_ALIASES) {
-          if (alias !== MASTER_EMAIL) {
+          if (alias !== cleanEmail) {
             await User.findOneAndUpdate(
               { email: alias },
               { $set: { ...updatedData, email: alias } },
@@ -622,7 +642,8 @@ app.post('/api/user/sync-data', async (req, res) => {
     }
 
     // Broadcast in real-time to all connected devices for this user & aliases
-    const targetRooms = cleanEmail === MASTER_EMAIL
+    const isMasterOrAliasBroadcast = KNOWN_USER_ALIASES.includes(cleanEmail) || cleanEmail === MASTER_EMAIL;
+    const targetRooms = isMasterOrAliasBroadcast
       ? Array.from(new Set([`user:${rawEmail}`, `user:${cleanEmail}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
       : [`user:${rawEmail}`, `user:${cleanEmail}`];
 
@@ -729,20 +750,36 @@ app.post('/api/expenses/delete', async (req, res) => {
     const filtered = currentExpenses.filter(e => String(e.id) !== targetId);
 
     if (mongoose.connection.readyState === 1) {
-      await User.findOneAndUpdate(
-        { email: cleanEmail },
-        { $set: { expenses: filtered, updatedAt: new Date() } },
-        { upsert: true, new: true }
-      );
+      const isMasterOrAlias = KNOWN_USER_ALIASES.includes(cleanEmail) || cleanEmail === MASTER_EMAIL;
+      const targetEmails = isMasterOrAlias ? KNOWN_USER_ALIASES : [cleanEmail];
+
+      for (const em of targetEmails) {
+        await User.findOneAndUpdate(
+          { email: em },
+          { 
+            $set: { expenses: filtered, updatedAt: new Date() },
+            $addToSet: { deletedExpenseIds: targetId }
+          },
+          { upsert: true, new: true }
+        );
+      }
     } else if (user) {
       user.expenses = filtered;
+      user.deletedExpenseIds = Array.from(new Set([...(user.deletedExpenseIds || []), targetId]));
       user.updatedAt = new Date();
     }
 
-    io.to(`user:${cleanEmail}`).emit('user_data_synced', {
-      email: cleanEmail,
-      expenses: filtered,
-      deletedExpenseIds: [targetId]
+    const isMasterOrAliasDelete = KNOWN_USER_ALIASES.includes(cleanEmail) || cleanEmail === MASTER_EMAIL;
+    const targetRooms = isMasterOrAliasDelete
+      ? Array.from(new Set([`user:${cleanEmail}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
+      : [`user:${cleanEmail}`];
+
+    targetRooms.forEach(room => {
+      io.to(room).emit('user_data_synced', {
+        email: cleanEmail,
+        expenses: filtered,
+        deletedExpenseIds: [targetId]
+      });
     });
 
     return res.json({ success: true, deletedId: targetId, count: filtered.length });
@@ -1505,9 +1542,10 @@ io.on('connection', (socket) => {
           { upsert: true }
         );
 
-        if (cleanEmail === MASTER_EMAIL) {
+        const isMasterOrAlias = KNOWN_USER_ALIASES.includes(cleanEmail) || cleanEmail === MASTER_EMAIL;
+        if (isMasterOrAlias) {
           for (const alias of KNOWN_USER_ALIASES) {
-            if (alias !== MASTER_EMAIL) {
+            if (alias !== cleanEmail) {
               await User.findOneAndUpdate(
                 { email: alias },
                 { $set: { ...updatedData, email: alias } },
@@ -1526,7 +1564,8 @@ io.on('connection', (socket) => {
     }
 
     // Broadcast in real-time to other connected devices of this user & aliases
-    const targetRooms = cleanEmail === MASTER_EMAIL
+    const isMasterOrAliasBroadcast = KNOWN_USER_ALIASES.includes(cleanEmail) || cleanEmail === MASTER_EMAIL;
+    const targetRooms = isMasterOrAliasBroadcast
       ? Array.from(new Set([`user:${rawEmail}`, `user:${cleanEmail}`, ...KNOWN_USER_ALIASES.map(a => `user:${a}`)]))
       : [`user:${rawEmail}`, `user:${cleanEmail}`];
 
