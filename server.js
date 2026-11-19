@@ -13,6 +13,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const { getTrendingNews, getIpoRadar } = require('./newsService');
+const { getGujaratLiveRates } = require('./ratesService');
 
 const app = express();
 const server = http.createServer(app);
@@ -1484,7 +1485,70 @@ app.get('/api/news/trending', async (req, res) => {
   }
 });
 
+// Live Gujarat & Ahmedabad Rates (Gold, Silver, Petrol, Diesel, CNG)
+app.get('/api/gujarat/live-rates', (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true';
+    const data = getGujaratLiveRates(forceRefresh);
+    return res.json(data);
+  } catch (err) {
+    console.error('Error in /api/gujarat/live-rates:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 io.on('connection', (socket) => {
+  // -------------------------------------------------------------
+  // Instant QR Cross-Device Drop (Mobile ↔ Laptop Instant Transfer)
+  // -------------------------------------------------------------
+  socket.on('join_drop_room', ({ roomId, deviceType, deviceName }) => {
+    if (!roomId) return;
+    const cleanRoom = roomId.trim().toUpperCase();
+    socket.join(`drop:${cleanRoom}`);
+    socket.dropRoomId = cleanRoom;
+    socket.deviceType = deviceType || 'Device';
+    socket.deviceName = deviceName || (deviceType === 'mobile' ? 'Mobile Phone' : 'Laptop / PC');
+
+    const room = io.sockets.adapter.rooms.get(`drop:${cleanRoom}`);
+    const deviceCount = room ? room.size : 1;
+
+    io.to(`drop:${cleanRoom}`).emit('drop_room_status', {
+      roomId: cleanRoom,
+      deviceCount,
+      joinedDevice: {
+        type: socket.deviceType,
+        name: socket.deviceName
+      }
+    });
+  });
+
+  socket.on('drop_send_payload', (payload) => {
+    if (!payload || !payload.roomId) return;
+    const cleanRoom = payload.roomId.trim().toUpperCase();
+    socket.to(`drop:${cleanRoom}`).emit('drop_receive_payload', {
+      id: 'drop_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+      timestamp: new Date().toISOString(),
+      ...payload
+    });
+  });
+
+  socket.on('disconnecting', () => {
+    if (socket.dropRoomId) {
+      const roomName = `drop:${socket.dropRoomId}`;
+      setTimeout(() => {
+        const room = io.sockets.adapter.rooms.get(roomName);
+        const deviceCount = room ? room.size : 0;
+        io.to(roomName).emit('drop_room_status', {
+          roomId: socket.dropRoomId,
+          deviceCount,
+          leftDevice: {
+            type: socket.deviceType,
+            name: socket.deviceName
+          }
+        });
+      }, 300);
+    }
+  });
   // Join a room for the logged-in user's email
   socket.on('join_user_room', (email) => {
     if (email) {
