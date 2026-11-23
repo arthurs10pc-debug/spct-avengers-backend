@@ -1458,7 +1458,76 @@ app.all('/api/notes-scheduler/trigger', async (req, res) => {
   }
 });
 
+// Real-Time Google Places Live Rank Scraper (100% Free Headless Engine)
+let seoScraperModule = null;
+function getSeoScraper() {
+  if (!seoScraperModule) {
+    seoScraperModule = require('./services/seoScraper');
+  }
+  return seoScraperModule;
+}
+
+app.post('/api/seo/live-rank-scan', async (req, res) => {
+  try {
+    const { keywords, targetBusinessName } = req.body;
+    if (!keywords || !Array.isArray(keywords) || keywords.length === 0) {
+      return res.status(400).json({ error: 'Keywords array is required' });
+    }
+    if (!targetBusinessName || !targetBusinessName.trim()) {
+      return res.status(400).json({ error: 'Target business name is required' });
+    }
+
+    console.log(`[SEO Live Scraper] Starting real-time scan for "${targetBusinessName}" across ${keywords.length} keywords...`);
+    const { scanBatchKeywords } = getSeoScraper();
+    const results = await scanBatchKeywords({
+      keywords,
+      targetBusinessName,
+      onProgress: (p) => {
+        io.emit('seo_scan_progress', p);
+      }
+    });
+
+    return res.json({ success: true, count: results.length, results });
+  } catch (err) {
+    console.error('[SEO Live Scraper] Error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/seo/live-single-keyword', async (req, res) => {
+  try {
+    const { keyword, targetBusinessName } = req.body;
+    if (!keyword || !targetBusinessName) {
+      return res.status(400).json({ error: 'Keyword and targetBusinessName are required' });
+    }
+    const { scanSingleKeywordStandalone } = getSeoScraper();
+    const result = await scanSingleKeywordStandalone(keyword, targetBusinessName);
+    return res.json({ success: true, result });
+  } catch (err) {
+    console.error('[SEO Single Scraper] Error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 io.on('connection', (socket) => {
+  // Real-Time Google Places Live Scan via WebSocket
+  socket.on('start_live_seo_scan', async ({ keywords, targetBusinessName }) => {
+    try {
+      if (!keywords || !keywords.length || !targetBusinessName) return;
+      console.log(`[Socket SEO] Live scan started for "${targetBusinessName}" (${keywords.length} keywords)`);
+      const { scanBatchKeywords } = getSeoScraper();
+      const results = await scanBatchKeywords({
+        keywords,
+        targetBusinessName,
+        onProgress: (progressData) => {
+          socket.emit('seo_scan_step', progressData);
+        }
+      });
+      socket.emit('seo_scan_finished', { success: true, results });
+    } catch (err) {
+      socket.emit('seo_scan_error', { error: err.message });
+    }
+  });
   // Join a room for the logged-in user's email
   socket.on('join_user_room', (email) => {
     if (email) {
